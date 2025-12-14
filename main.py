@@ -959,7 +959,7 @@ def run_experiment_1(
 def run_experiment_2(
     epsilon=1.0,
     num_tuples=100000,
-    repetitions=3,
+    repetitions=5,
     outfile="plots/experiment2.png"
 ):
     """Plot average runtimes over `repetitions` per measure and dataset as function of the number of criteria."""
@@ -1074,7 +1074,7 @@ def run_experiment_2(
 def run_experiment_3(
     epsilons=(0.1, 1, 5, 10),
     num_tuples=100000,
-    repetitions=3,
+    repetitions=5,
     outfile="plots/experiment3.png"
 ):
     """Relative L1 error as function of epsilon."""
@@ -1884,15 +1884,15 @@ def run_experiment_8(
 
 
 if __name__ == "__main__":
-    # create_plot_0()
-    # create_plot_1()
-    # create_plot_2()
-    # plot_legend()
-    # run_experiment_1()
-    # run_experiment_2()
-    # run_experiment_3()
-    # run_experiment_4()
-    # run_experiment_5()
-    # run_experiment_6()
-    # run_experiment_7()
+    create_plot_0()
+    create_plot_1()
+    create_plot_2()
+    plot_legend()
+    run_experiment_1()
+    run_experiment_2()
+    run_experiment_3()
+    run_experiment_4()
+    run_experiment_5()
+    run_experiment_6()
+    run_experiment_7()
     run_experiment_8()
