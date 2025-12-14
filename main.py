@@ -1722,8 +1722,8 @@ def run_experiment_7(
 
 
 def run_experiment_8(
-    epsilon: Optional[float] = None,
-    n_per_sex: int = 500,                 # 500 males, 500 females
+    epsilon: Optional[float] = 1.0,
+    n_per_sex: int = 50000,
     step: float = 0.1,                    # switch 10% each iteration
     repetitions: int = 10,
     outfile: str = "plots/experiment8.png",
@@ -1738,31 +1738,20 @@ def run_experiment_8(
     So at t=1.0: all males income=1, all females income=0.
 
     Uses your global `measures` dict (ProxyMutualInformationTVD, ProxyRepairMaxSat, TupleContribution).
+    Adds shadow bands (min..max over repetitions) for every plotted line.
     """
 
     # ---- helpers -------------------------------------------------
     def _make_dataset(t: float) -> pd.DataFrame:
-        """
-        Create synthetic dataset for a given unfairness level t in [0,1].
-        sex: 1=male, 0=female (arbitrary, but consistent)
-        income: 1=income>50K, 0=otherwise
-        """
         n = n_per_sex
-
-        # Base fair allocation:
-        # males: n/2 income=0, n/2 income=1
-        # females: n/2 income=0, n/2 income=1
         m0 = n // 2
         m1 = n - m0
         f0 = n // 2
         f1 = n - f0
 
-        # How many to flip at level t
-        # flip t fraction of male income=0 -> 1, and t fraction of female income=1 -> 0
         flip_m = int(round(t * m0))
         flip_f = int(round(t * f1))
 
-        # After flipping:
         m0_new = m0 - flip_m
         m1_new = m1 + flip_m
         f1_new = f1 - flip_f
@@ -1778,27 +1767,23 @@ def run_experiment_8(
         ])
 
         df = pd.DataFrame({"sex": sex, "income>50K": income})
-
-        # Shuffle rows (important for any measure that might be order-sensitive)
         df = df.sample(frac=1.0, replace=False).reset_index(drop=True)
         return df
 
     def _dp_gap(df: pd.DataFrame) -> float:
-        """Demographic parity gap on the raw labels (no model): |P(y=1|male)-P(y=1|female)|."""
         rates = df.groupby("sex")["income>50K"].mean()
         return float(abs(rates.max() - rates.min())) if len(rates) else 0.0
 
     # ---- build unfairness grid ----------------------------------
-    # If you want exactly: start + 10 flips until fully polarized, use t in {0.0,0.1,...,1.0}
     ts = [round(i * step, 10) for i in range(int(1 / step) + 1)]
-    # Optionally truncate/override with num_steps if you want a different count:
-    # ts = [round(i * step, 10) for i in range(num_steps + 1)]
-
     criterion = ["sex", "income>50K"]
 
-    # Store results: measure_name -> list over t
-    results = {name: [] for name in measures.keys()}
-    dp_gaps = []
+    # Store per-t aggregates: mean/min/max for each measure and for dp-gap
+    results = {
+        name: {"mean": [], "min": [], "max": []}
+        for name in measures.keys()
+    }
+    dp_stats = {"mean": [], "min": [], "max": []}
 
     # ---- run -----------------------------------------------------
     for t in ts:
@@ -1808,7 +1793,6 @@ def run_experiment_8(
         for _ in range(repetitions):
             df = _make_dataset(t)
 
-            # All your measures take `data=...` and `calculate([criterion], epsilon=...)`
             for measure_name, measure_cls in measures.items():
                 m = measure_cls(data=df[criterion].copy())
                 with ThreadPoolExecutor() as executor:
@@ -1824,17 +1808,34 @@ def run_experiment_8(
 
             dp_rep.append(_dp_gap(df))
 
-        # Aggregate
+        # Aggregate per measure: mean/min/max (ignoring NaNs)
         for measure_name in measures.keys():
             arr = np.asarray(vals_rep[measure_name], dtype=float)
             arr = arr[~np.isnan(arr)]
-            results[measure_name].append(float(arr.mean()) if arr.size else np.nan)
+            if arr.size == 0:
+                results[measure_name]["mean"].append(np.nan)
+                results[measure_name]["min"].append(np.nan)
+                results[measure_name]["max"].append(np.nan)
+            else:
+                results[measure_name]["mean"].append(float(arr.mean()))
+                results[measure_name]["min"].append(float(arr.min()))
+                results[measure_name]["max"].append(float(arr.max()))
 
         dp_arr = np.asarray(dp_rep, dtype=float)
-        dp_gaps.append(float(dp_arr.mean()) if dp_arr.size else np.nan)
+        dp_arr = dp_arr[~np.isnan(dp_arr)]
+        if dp_arr.size == 0:
+            dp_stats["mean"].append(np.nan)
+            dp_stats["min"].append(np.nan)
+            dp_stats["max"].append(np.nan)
+        else:
+            dp_stats["mean"].append(float(dp_arr.mean()))
+            dp_stats["min"].append(float(dp_arr.min()))
+            dp_stats["max"].append(float(dp_arr.max()))
 
-        print(f"t={t:.1f}  DP-gap≈{dp_gaps[-1]:.3f}  " +
-              "  ".join([f"{mn}≈{results[mn][-1]:.4f}" for mn in measures.keys()]))
+        print(
+            f"t={t:.1f}  DP-gap≈{dp_stats['mean'][-1]:.3f}  " +
+            "  ".join([f"{mn}≈{results[mn]['mean'][-1]:.4f}" for mn in measures.keys()])
+        )
 
     # ---- plot ----------------------------------------------------
     plt.rcParams.update({
@@ -1848,28 +1849,33 @@ def run_experiment_8(
 
     fig, ax = plt.subplots(figsize=(12, 6))
 
-    x = np.asarray(ts, dtype=float)
+    # Use DP-gap mean on x-axis (as you want)
+    x = np.asarray(dp_stats["mean"], dtype=float)
+
     for measure_name in measures.keys():
-        y = np.asarray(results[measure_name], dtype=float)
-        ax.plot(x, y, marker="o", linewidth=2, label=measure_name)
+        y_mean = np.asarray(results[measure_name]["mean"], dtype=float)
+        y_min  = np.asarray(results[measure_name]["min"], dtype=float)
+        y_max  = np.asarray(results[measure_name]["max"], dtype=float)
 
-    # Optional: also show DP-gap (ground-truth unfairness) on a second axis
-    ax2 = ax.twinx()
-    ax2.plot(x, np.asarray(dp_gaps, dtype=float), marker="s", linewidth=2, linestyle="--", label="DP-gap")
-    ax2.set_ylabel("DP-gap")
-    ax2.yaxis.set_major_formatter(y_formatter)
+        line, = ax.plot(x, y_mean, marker="o", linewidth=2, label=measure_name)
 
-    # ax.set_title("Measure Values vs Growing Unfairness (Synthetic sex × income)")
-    ax.set_xlabel("flip fraction (0 = fair, 1 = fully unfair)")
+        # Shadow band: min..max (skip NaNs safely)
+        mask = ~np.isnan(x) & ~np.isnan(y_min) & ~np.isnan(y_max)
+        if mask.any():
+            ax.fill_between(
+                x[mask],
+                y_min[mask],
+                y_max[mask],
+                alpha=0.2,
+                color=line.get_color(),
+                linewidth=0,
+            )
+
+    ax.set_xlabel("Demographic Parity gap")
     ax.set_yscale('log')
     ax.set_ylabel("measure value (log scale)")
     ax.grid(True, linestyle="--", alpha=0.4)
     ax.yaxis.set_major_formatter(y_formatter)
-
-    # Merge legends from both axes
-    h1, l1 = ax.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    # ax.legend(h1 + h2, l1 + l2, loc="lower right", frameon=True)
 
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     plt.tight_layout()
