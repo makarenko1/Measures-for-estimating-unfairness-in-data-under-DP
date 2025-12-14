@@ -1,8 +1,6 @@
 import time
-from collections import defaultdict
 from itertools import combinations
 
-import duckdb
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
@@ -154,7 +152,7 @@ class ProxyRepairMaxSat:
 
         model = opt.model()
         D_set = set(D)
-        DR = {t for t in D_star if model.evaluate(Bool(f"x_{t}"))}
+        DR = {t for t in D_star if model.evaluate(Bool(f"x_{t}"), model_completion=True)}
         return len(D_set.symmetric_difference(DR))
 
     @staticmethod

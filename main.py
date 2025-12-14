@@ -1721,15 +1721,172 @@ def run_experiment_7(
     plt.show()
 
 
+def run_experiment_8(
+    epsilon: Optional[float] = None,
+    n_per_sex: int = 500,                 # 500 males, 500 females
+    step: float = 0.1,                    # switch 10% each iteration
+    repetitions: int = 10,
+    outfile: str = "plots/experiment8.png",
+):
+    """
+    Plot measure values vs growing unfairness on a synthetic dataset with two columns:
+      sex in {0,1} and income>50K in {0,1}.
+    Start fair: for each sex, 50% income=0 and 50% income=1.
+    Then, at each step t = 0, step, 2*step, ..., 1.0:
+      - flip a fraction t of (male, income=0) to income=1
+      - flip a fraction t of (female, income=1) to income=0
+    So at t=1.0: all males income=1, all females income=0.
+
+    Uses your global `measures` dict (ProxyMutualInformationTVD, ProxyRepairMaxSat, TupleContribution).
+    """
+
+    # ---- helpers -------------------------------------------------
+    def _make_dataset(t: float) -> pd.DataFrame:
+        """
+        Create synthetic dataset for a given unfairness level t in [0,1].
+        sex: 1=male, 0=female (arbitrary, but consistent)
+        income: 1=income>50K, 0=otherwise
+        """
+        n = n_per_sex
+
+        # Base fair allocation:
+        # males: n/2 income=0, n/2 income=1
+        # females: n/2 income=0, n/2 income=1
+        m0 = n // 2
+        m1 = n - m0
+        f0 = n // 2
+        f1 = n - f0
+
+        # How many to flip at level t
+        # flip t fraction of male income=0 -> 1, and t fraction of female income=1 -> 0
+        flip_m = int(round(t * m0))
+        flip_f = int(round(t * f1))
+
+        # After flipping:
+        m0_new = m0 - flip_m
+        m1_new = m1 + flip_m
+        f1_new = f1 - flip_f
+        f0_new = f0 + flip_f
+
+        sex = np.concatenate([
+            np.ones(m0_new + m1_new, dtype=int),   # males = 1
+            np.zeros(f0_new + f1_new, dtype=int),  # females = 0
+        ])
+        income = np.concatenate([
+            np.concatenate([np.zeros(m0_new, dtype=int), np.ones(m1_new, dtype=int)]),
+            np.concatenate([np.zeros(f0_new, dtype=int), np.ones(f1_new, dtype=int)]),
+        ])
+
+        df = pd.DataFrame({"sex": sex, "income>50K": income})
+
+        # Shuffle rows (important for any measure that might be order-sensitive)
+        df = df.sample(frac=1.0, replace=False).reset_index(drop=True)
+        return df
+
+    def _dp_gap(df: pd.DataFrame) -> float:
+        """Demographic parity gap on the raw labels (no model): |P(y=1|male)-P(y=1|female)|."""
+        rates = df.groupby("sex")["income>50K"].mean()
+        return float(abs(rates.max() - rates.min())) if len(rates) else 0.0
+
+    # ---- build unfairness grid ----------------------------------
+    # If you want exactly: start + 10 flips until fully polarized, use t in {0.0,0.1,...,1.0}
+    ts = [round(i * step, 10) for i in range(int(1 / step) + 1)]
+    # Optionally truncate/override with num_steps if you want a different count:
+    # ts = [round(i * step, 10) for i in range(num_steps + 1)]
+
+    criterion = ["sex", "income>50K"]
+
+    # Store results: measure_name -> list over t
+    results = {name: [] for name in measures.keys()}
+    dp_gaps = []
+
+    # ---- run -----------------------------------------------------
+    for t in ts:
+        vals_rep = {name: [] for name in measures.keys()}
+        dp_rep = []
+
+        for _ in range(repetitions):
+            df = _make_dataset(t)
+
+            # All your measures take `data=...` and `calculate([criterion], epsilon=...)`
+            for measure_name, measure_cls in measures.items():
+                m = measure_cls(data=df[criterion].copy())
+                with ThreadPoolExecutor() as executor:
+                    try:
+                        v = executor.submit(
+                            m.calculate,
+                            [criterion],
+                            epsilon=epsilon,
+                        ).result(timeout=timeout_seconds)
+                        vals_rep[measure_name].append(float(v))
+                    except TimeoutError:
+                        vals_rep[measure_name].append(np.nan)
+
+            dp_rep.append(_dp_gap(df))
+
+        # Aggregate
+        for measure_name in measures.keys():
+            arr = np.asarray(vals_rep[measure_name], dtype=float)
+            arr = arr[~np.isnan(arr)]
+            results[measure_name].append(float(arr.mean()) if arr.size else np.nan)
+
+        dp_arr = np.asarray(dp_rep, dtype=float)
+        dp_gaps.append(float(dp_arr.mean()) if dp_arr.size else np.nan)
+
+        print(f"t={t:.1f}  DP-gap≈{dp_gaps[-1]:.3f}  " +
+              "  ".join([f"{mn}≈{results[mn][-1]:.4f}" for mn in measures.keys()]))
+
+    # ---- plot ----------------------------------------------------
+    plt.rcParams.update({
+        "axes.titlesize": 25,
+        "axes.labelsize": 28,
+        "xtick.labelsize": 22,
+        "ytick.labelsize": 22,
+        "figure.titlesize": 34,
+        "legend.fontsize": 18,
+    })
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    x = np.asarray(ts, dtype=float)
+    for measure_name in measures.keys():
+        y = np.asarray(results[measure_name], dtype=float)
+        ax.plot(x, y, marker="o", linewidth=2, label=measure_name)
+
+    # Optional: also show DP-gap (ground-truth unfairness) on a second axis
+    ax2 = ax.twinx()
+    ax2.plot(x, np.asarray(dp_gaps, dtype=float), marker="s", linewidth=2, linestyle="--", label="DP-gap")
+    ax2.set_ylabel("DP-gap")
+    ax2.yaxis.set_major_formatter(y_formatter)
+
+    # ax.set_title("Measure Values vs Growing Unfairness (Synthetic sex × income)")
+    ax.set_xlabel("flip fraction (0 = fair, 1 = fully unfair)")
+    ax.set_yscale('log')
+    ax.set_ylabel("measure value (log scale)")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.yaxis.set_major_formatter(y_formatter)
+
+    # Merge legends from both axes
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    # ax.legend(h1 + h2, l1 + l2, loc="lower right", frameon=True)
+
+    os.makedirs(os.path.dirname(outfile), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(outfile, dpi=256, bbox_inches="tight")
+    plt.show()
+
+
 if __name__ == "__main__":
-    create_plot_0()
-    create_plot_1()
-    create_plot_2()
-    plot_legend()
-    run_experiment_1()
-    run_experiment_2()
-    run_experiment_3()
-    run_experiment_4()
-    run_experiment_5()
-    run_experiment_6()
-    run_experiment_7()
+    # create_plot_0()
+    # create_plot_1()
+    # create_plot_2()
+    # plot_legend()
+    # run_experiment_1()
+    # run_experiment_2()
+    # run_experiment_3()
+    # run_experiment_4()
+    # run_experiment_5()
+    # run_experiment_6()
+    # run_experiment_7()
+    run_experiment_8()
