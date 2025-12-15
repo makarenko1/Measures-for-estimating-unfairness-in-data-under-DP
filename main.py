@@ -1722,7 +1722,7 @@ def run_experiment_7(
 
 
 def run_experiment_8(
-    epsilon: Optional[float] = 1.0,
+    epsilon: Optional[float] = 10,
     n_per_sex: int = 50000,
     step: float = 0.1,                    # switch 10% each iteration
     repetitions: int = 10,
@@ -1884,15 +1884,15 @@ def run_experiment_8(
 
 
 if __name__ == "__main__":
-    create_plot_0()
-    create_plot_1()
-    create_plot_2()
-    plot_legend()
-    run_experiment_1()
-    run_experiment_2()
-    run_experiment_3()
-    run_experiment_4()
-    run_experiment_5()
-    run_experiment_6()
-    run_experiment_7()
+    # create_plot_0()
+    # create_plot_1()
+    # create_plot_2()
+    # plot_legend()
+    # run_experiment_1()
+    # run_experiment_2()
+    # run_experiment_3()
+    # run_experiment_4()
+    # run_experiment_5()
+    # run_experiment_6()
+    # run_experiment_7()
     run_experiment_8()
