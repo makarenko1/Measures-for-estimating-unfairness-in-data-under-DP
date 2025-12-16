@@ -87,23 +87,27 @@ class ProxyRepairMaxSat:
 
             # Prepare dataframe for this criterion
             if encode_and_clean:
-                df_base = self._encode_and_clean(self.dataset, cols)
+                df = self._encode_and_clean(self.dataset, cols)
             else:
-                df_base = self.dataset[cols]
-
-            n_rows = len(df_base)
+                df = self.dataset[cols]
+            df = (
+                df
+                .sort_values(by=cols, kind="mergesort")
+                .reset_index(drop=True)
+            )
+            n_rows = len(df)
 
             if chunk_size is None:
                 # Single chunk: full data
                 chunk_repair = self._repair_for_df(
-                    df_base, cols, admissible_col, soft_clauses_percentage
+                    df, cols, admissible_col, soft_clauses_percentage
                 )
                 total_repair += chunk_repair
             else:
                 # Multiple chunks
                 for start in range(0, n_rows, chunk_size):
                     end = start + chunk_size
-                    df_chunk = df_base.iloc[start:end]
+                    df_chunk = df.iloc[start:end]
                     if df_chunk.empty:
                         continue
                     chunk_repair = self._repair_for_df(
