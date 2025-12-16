@@ -488,7 +488,7 @@ def create_plot_0(
     plt.show()
 
 
-def create_plot_1():
+def create_plot_1(outfile: str="plots/plot1.png"):
     # --- config ---------------------------------------------------
     # Row order: MI, PrivBayes Original, PrivBayes with offset, TVD
     PROXIES = [
@@ -622,11 +622,11 @@ def create_plot_1():
             # <<< format y tick labels here
             ax.yaxis.set_major_formatter(y_formatter)
 
-    plt.savefig("plots/plot1.png", dpi=220)
+    plt.savefig(outfile, dpi=220)
     plt.show()
 
 
-def create_plot_2():
+def create_plot_2(outfile: str="plots/plot2.png"):
     # --- config ---------------------------------------------------
     MEASURES = [
         ("TVD Proxy", "TVD"),
@@ -721,7 +721,139 @@ def create_plot_2():
             ax.tick_params(axis='y', labelsize=TICK_FS)
             ax.yaxis.set_major_formatter(y_formatter)  # <<< apply formatter
 
-    plt.savefig("plots/plot2.png", dpi=220)
+    plt.savefig(outfile, dpi=220)
+    plt.show()
+
+
+def create_plot_3(
+        epsilon: float = 1.0,
+        num_tuples: int = 1000,
+        repetitions: int = 10,
+        outfile: str = "plots/plot3.png",
+):
+    """
+    For each dataset: histogram with X = fairness criteria (indexed 1..k), Y = value.
+    For each criterion, show two bars: RepairSat and its proxy
+    Repairsat with chunks, averaged over `repetitions`.
+    """
+
+    plt.rcParams.update({
+        "axes.titlesize": 34,
+        "axes.labelsize": 30,
+        "xtick.labelsize": 24,
+        "ytick.labelsize": 24,
+        "figure.titlesize": 34,
+    })
+
+    fig, axes = plt.subplots(1, 5, figsize=(30, 6), sharey=False)
+    if not isinstance(axes, np.ndarray):
+        axes = np.array([axes])
+
+    for ax, (ds_name, spec) in zip(axes, datasets.items()):
+        path = spec["path"]
+        criteria = spec["criteria"]
+        cols_list = []
+        for criterion in criteria:
+            cols_list += criterion
+        df_full = _encode_and_clean(path, cols_list)
+        n = min(num_tuples, len(df_full))
+        repair_regular_sums = {}
+        repair_with_chunks_sums = {}
+        repair_regular_counts = {}
+        repair_with_chunks_counts = {}
+
+        for criterion in criteria:
+            if len(criterion) == 3:
+                protected, response, admissible = criterion
+                crit_label = f"{protected} , {response} | {admissible}"
+            else:
+                protected, response = criterion[0], criterion[1]
+                crit_label = f"{protected} , {response}"
+
+            repair_regular_sums[crit_label] = 0.0
+            repair_with_chunks_sums[crit_label] = 0.0
+            repair_regular_counts[crit_label] = 0
+            repair_with_chunks_counts[crit_label] = 0
+
+        for _ in range(repetitions):
+            if n < len(df_full):
+                df = df_full.sample(n=n, replace=False)
+            else:
+                df = df_full
+            repair_regular = ProxyRepairMaxSat(data=df)
+            repair_with_chunks = ProxyRepairMaxSat(data=df)
+
+            for criterion in criteria:
+                if len(criterion) == 3:
+                    protected, response, admissible = criterion
+                    crit_label = f"{protected} , {response} | {admissible}"
+                else:
+                    protected, response = criterion[0], criterion[1]
+                    crit_label = f"{protected} , {response}"
+                with ThreadPoolExecutor() as executor:
+                    try:
+                        if path == "data/stackoverflow.csv":  # Stackoverflow times out
+                            raise TimeoutError
+                        repair_regular_val = executor.submit(
+                            repair_regular.calculate, fairness_criteria=[criterion], epsilon=epsilon, chunk_size=None
+                        ).result(timeout=timeout_seconds)
+                        repair_regular_sums[crit_label] += float(repair_regular_val)
+                        repair_regular_counts[crit_label] += 1
+                    except TimeoutError:
+                        print("Skipping iteration due to timeout.")
+                with ThreadPoolExecutor() as executor:
+                    try:
+                        repair_with_chunks_val = executor.submit(
+                            repair_with_chunks.calculate, [criterion], epsilon=epsilon, chunk_size=100
+                        ).result(timeout=timeout_seconds)
+                        repair_with_chunks_sums[crit_label] += float(repair_with_chunks_val)
+                        repair_with_chunks_counts[crit_label] += 1
+                    except TimeoutError:
+                        print("Skipping iteration due to timeout.")
+
+        crit_labels = sorted(repair_regular_sums.keys())
+        x = np.arange(len(crit_labels), dtype=float)
+        width = 0.35
+        repair_regular_vals = []
+        repair_with_chunks_vals = []
+        for cl in crit_labels:
+            mi_mean = repair_regular_sums[cl] / repair_regular_counts[cl] if repair_regular_counts[cl] > 0 else np.nan
+            tvd_mean = repair_with_chunks_sums[cl] / repair_with_chunks_counts[cl] if (
+                    repair_with_chunks_counts[cl] > 0) else np.nan
+            repair_regular_vals.append(mi_mean)
+            repair_with_chunks_vals.append(tvd_mean)
+        repair_regular_vals = np.array(repair_regular_vals, dtype=float)
+        repair_with_chunks_vals = np.array(repair_with_chunks_vals, dtype=float)
+        mi_bars = ax.bar(x - width / 2, repair_regular_vals, width, label="Regular RepairMaxSAT")
+        ax.bar(x + width / 2, repair_with_chunks_vals, width, label="RepairMaxSAT with chunks")
+        ax.set_xlabel("criterion")
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(i) for i in range(1, len(crit_labels) + 1)])
+
+        for rect, val in zip(mi_bars, repair_regular_vals):
+            if not np.isnan(val):
+                height = rect.get_height()
+                ax.text(
+                    rect.get_x() + rect.get_width() / 2.0,
+                    height,
+                    f"{val:.2f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=18,
+                )
+
+        ax.set_title(ds_name)
+        ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+    fig.suptitle(
+        f"Comparison of regular RepairMaxSAT and RepairMaxSAT with chunks of size 100, "
+        f"{round(num_tuples / 1000)}K tuples",
+        y=1.03,
+    )
+    fig.tight_layout()
+
+    os.makedirs(os.path.dirname(outfile), exist_ok=True)
+    plt.savefig(outfile, dpi=256, bbox_inches="tight")
     plt.show()
 
 
@@ -1591,142 +1723,11 @@ def run_experiment_6(
 
 
 def run_experiment_7(
-        epsilon: float = 1.0,
-        num_tuples: int = 1000,
-        repetitions: int = 10,
-        outfile: str = "plots/experiment7.png",
-):
-    """
-    For each dataset: histogram with X = fairness criteria (indexed 1..k), Y = value.
-    For each criterion, show two bars: RepairSat and its proxy
-    Repairsat with chunks, averaged over `repetitions`.
-    """
-
-    plt.rcParams.update({
-        "axes.titlesize": 34,
-        "axes.labelsize": 30,
-        "xtick.labelsize": 24,
-        "ytick.labelsize": 24,
-        "figure.titlesize": 34,
-    })
-
-    fig, axes = plt.subplots(1, 5, figsize=(30, 6), sharey=False)
-    if not isinstance(axes, np.ndarray):
-        axes = np.array([axes])
-
-    for ax, (ds_name, spec) in zip(axes, datasets.items()):
-        path = spec["path"]
-        criteria = spec["criteria"]
-        cols_list = []
-        for criterion in criteria:
-            cols_list += criterion
-        df_full = _encode_and_clean(path, cols_list)
-        n = min(num_tuples, len(df_full))
-        repair_regular_sums = {}
-        repair_with_chunks_sums = {}
-        repair_regular_counts = {}
-        repair_with_chunks_counts = {}
-
-        for criterion in criteria:
-            if len(criterion) == 3:
-                protected, response, admissible = criterion
-                crit_label = f"{protected} , {response} | {admissible}"
-            else:
-                protected, response = criterion[0], criterion[1]
-                crit_label = f"{protected} , {response}"
-
-            repair_regular_sums[crit_label] = 0.0
-            repair_with_chunks_sums[crit_label] = 0.0
-            repair_regular_counts[crit_label] = 0
-            repair_with_chunks_counts[crit_label] = 0
-
-        for _ in range(repetitions):
-            if n < len(df_full):
-                df = df_full.sample(n=n, replace=False)
-            else:
-                df = df_full
-            repair_regular = ProxyRepairMaxSat(data=df)
-            repair_with_chunks = ProxyRepairMaxSat(data=df)
-
-            for criterion in criteria:
-                if len(criterion) == 3:
-                    protected, response, admissible = criterion
-                    crit_label = f"{protected} , {response} | {admissible}"
-                else:
-                    protected, response = criterion[0], criterion[1]
-                    crit_label = f"{protected} , {response}"
-                with ThreadPoolExecutor() as executor:
-                    try:
-                        if path == "data/stackoverflow.csv":  # Stackoverflow times out
-                            raise TimeoutError
-                        repair_regular_val = executor.submit(
-                            repair_regular.calculate, fairness_criteria=[criterion], epsilon=epsilon, chunk_size=None
-                        ).result(timeout=timeout_seconds)
-                        repair_regular_sums[crit_label] += float(repair_regular_val)
-                        repair_regular_counts[crit_label] += 1
-                    except TimeoutError:
-                        print("Skipping iteration due to timeout.")
-                with ThreadPoolExecutor() as executor:
-                    try:
-                        repair_with_chunks_val = executor.submit(
-                            repair_with_chunks.calculate, [criterion], epsilon=epsilon, chunk_size=100
-                        ).result(timeout=timeout_seconds)
-                        repair_with_chunks_sums[crit_label] += float(repair_with_chunks_val)
-                        repair_with_chunks_counts[crit_label] += 1
-                    except TimeoutError:
-                        print("Skipping iteration due to timeout.")
-
-        crit_labels = sorted(repair_regular_sums.keys())
-        x = np.arange(len(crit_labels), dtype=float)
-        width = 0.35
-        repair_regular_vals = []
-        repair_with_chunks_vals = []
-        for cl in crit_labels:
-            mi_mean = repair_regular_sums[cl] / repair_regular_counts[cl] if repair_regular_counts[cl] > 0 else np.nan
-            tvd_mean = repair_with_chunks_sums[cl] / repair_with_chunks_counts[cl] if (
-                    repair_with_chunks_counts[cl] > 0) else np.nan
-            repair_regular_vals.append(mi_mean)
-            repair_with_chunks_vals.append(tvd_mean)
-        repair_regular_vals = np.array(repair_regular_vals, dtype=float)
-        repair_with_chunks_vals = np.array(repair_with_chunks_vals, dtype=float)
-        mi_bars = ax.bar(x - width / 2, repair_regular_vals, width, label="Regular RepairMaxSAT")
-        ax.bar(x + width / 2, repair_with_chunks_vals, width, label="RepairMaxSAT with chunks")
-        ax.set_xlabel("criterion")
-        ax.set_xticks(x)
-        ax.set_xticklabels([str(i) for i in range(1, len(crit_labels) + 1)])
-
-        for rect, val in zip(mi_bars, repair_regular_vals):
-            if not np.isnan(val):
-                height = rect.get_height()
-                ax.text(
-                    rect.get_x() + rect.get_width() / 2.0,
-                    height,
-                    f"{val:.2f}",
-                    ha="center",
-                    va="bottom",
-                    fontsize=18,
-                )
-
-        ax.set_title(ds_name)
-        ax.grid(axis="y", linestyle="--", alpha=0.3)
-
-    fig.suptitle(
-        f"Comparison of regular RepairMaxSAT and RepairMaxSAT with chunks of size 100, {round(num_tuples / 1000)}K tuples",
-        y=1.03,
-    )
-    fig.tight_layout()
-
-    os.makedirs(os.path.dirname(outfile), exist_ok=True)
-    plt.savefig(outfile, dpi=256, bbox_inches="tight")
-    plt.show()
-
-
-def run_experiment_8(
     epsilon: Optional[float] = 10,
     n_per_sex: int = 50000,
     step: float = 0.1,                    # switch 10% each iteration
     repetitions: int = 10,
-    outfile: str = "plots/experiment8.png",
+    outfile: str = "plots/experiment7.png",
 ):
     """
     Plot measure values vs growing unfairness on a synthetic dataset with two columns:
@@ -1887,6 +1888,7 @@ if __name__ == "__main__":
     # create_plot_0()
     # create_plot_1()
     # create_plot_2()
+    # create_plot_3()
     # plot_legend()
     # run_experiment_1()
     # run_experiment_2()
@@ -1894,5 +1896,4 @@ if __name__ == "__main__":
     # run_experiment_4()
     # run_experiment_5()
     # run_experiment_6()
-    # run_experiment_7()
-    run_experiment_8()
+    run_experiment_7()
