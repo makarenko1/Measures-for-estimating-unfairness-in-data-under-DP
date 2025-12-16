@@ -1091,7 +1091,7 @@ def run_experiment_1(
 def run_experiment_2(
     epsilon=1.0,
     num_tuples=100000,
-    repetitions=5,
+    repetitions=10,
     outfile="plots/experiment2.png"
 ):
     """Plot average runtimes over `repetitions` per measure and dataset as function of the number of criteria."""
@@ -1206,7 +1206,7 @@ def run_experiment_2(
 def run_experiment_3(
     epsilons=(0.1, 1, 5, 10),
     num_tuples=100000,
-    repetitions=5,
+    repetitions=10,
     outfile="plots/experiment3.png"
 ):
     """Relative L1 error as function of epsilon."""
@@ -1723,10 +1723,10 @@ def run_experiment_6(
 
 
 def run_experiment_7(
-    epsilon: Optional[float] = 10,
-    n_per_sex: int = 50000,
-    step: float = 0.1,                    # switch 10% each iteration
-    repetitions: int = 10,
+    epsilon: Optional[float]=10,
+    n_per_sex: int=50000,
+    step: float=0.1,                    # switch 10% each iteration
+    repetitions: int=10,
     outfile: str = "plots/experiment7.png",
 ):
     """
@@ -1744,12 +1744,23 @@ def run_experiment_7(
 
     # ---- helpers -------------------------------------------------
     def _make_dataset(t: float) -> pd.DataFrame:
+        """
+        Create synthetic dataset for a given unfairness level t in [0,1].
+        sex: 1=male, 0=female (arbitrary, but consistent)
+        income: 1=income>50K, 0=otherwise
+        """
         n = n_per_sex
+
+        # Base fair allocation:
+        # males: n/2 income=0, n/2 income=1
+        # females: n/2 income=0, n/2 income=1
         m0 = n // 2
         m1 = n - m0
         f0 = n // 2
         f1 = n - f0
 
+        # How many to flip at level t
+        # flip t fraction of male income=0 -> 1, and t fraction of female income=1 -> 0
         flip_m = int(round(t * m0))
         flip_f = int(round(t * f1))
 
@@ -1885,15 +1896,15 @@ def run_experiment_7(
 
 
 if __name__ == "__main__":
-    # create_plot_0()
-    # create_plot_1()
-    # create_plot_2()
-    # create_plot_3()
-    # plot_legend()
-    # run_experiment_1()
-    # run_experiment_2()
-    # run_experiment_3()
-    # run_experiment_4()
-    # run_experiment_5()
-    # run_experiment_6()
+    create_plot_0()
+    create_plot_1()
+    create_plot_2()
+    create_plot_3()
+    plot_legend()
+    run_experiment_1()
+    run_experiment_2()
+    run_experiment_3()
+    run_experiment_4()
+    run_experiment_5()
+    run_experiment_6()
     run_experiment_7()
