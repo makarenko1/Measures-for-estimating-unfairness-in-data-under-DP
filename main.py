@@ -1848,7 +1848,7 @@ def run_experiment_7(
         "legend.fontsize": 18,
     })
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = plt.subplots(figsize=(8, 6))
 
     # Use DP-gap mean on x-axis (as you want)
     x = np.asarray(dp_stats["mean"], dtype=float)
