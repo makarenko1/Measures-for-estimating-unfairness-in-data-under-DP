@@ -90,11 +90,6 @@ class ProxyRepairMaxSat:
                 df = self._encode_and_clean(self.dataset, cols)
             else:
                 df = self.dataset[cols]
-            df = (
-                df
-                .sort_values(by=cols, kind="mergesort")
-                .reset_index(drop=True)
-            )
             n_rows = len(df)
 
             if chunk_size is None:
