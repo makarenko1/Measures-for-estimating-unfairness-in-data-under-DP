@@ -1471,17 +1471,17 @@ def run_experiment_5(
     """TupleContribution value as function of k, sampling separately for each repetition."""
 
     ks_per_dataset = {
-        "Adult": [100, 500, 1000, 5000, 10000, 15000, 30000],
-        "IPUMS-CPS": [1000, 5000, 10000, 50000, 100000, 300000, 600000, 1000000],
-        "Stackoverflow": [1000, 5000, 10000, 20000, 40000, 60000],
-        "Compas": [100, 500, 1000, 1500, 3000, 7000, 10000],
+        "Adult": [100, 250, 500, 1000, 5000, 10000, 15000, 30000],
+        "IPUMS-CPS": [250, 500, 1000, 5000, 10000, 50000, 100000, 300000, 600000, 1000000],
+        "Stackoverflow": [250, 500, 1000, 5000, 10000, 20000, 40000, 60000],
+        "Compas": [100, 250, 500, 1000, 1500, 3000, 7000, 10000],
         "Healthcare": [100, 200, 400, 700, 1000],
     }
 
     plt.rcParams.update({
         "axes.titlesize": 34,
         "axes.labelsize": 28,
-        "xtick.labelsize": 19,
+        "xtick.labelsize": 16,
         "ytick.labelsize": 22,
         "figure.titlesize": 34,
     })
@@ -1597,17 +1597,17 @@ def run_experiment_5(
 
 def run_experiment_6(
     num_tuples=100000,
-    repetitions=10,
+    repetitions=50,
     epsilon=1.0,
     outfile="plots/experiment6.png",
 ):
     """Relative L1 error of TupleContribution as function of k."""
 
     ks_per_dataset = {
-        "Adult": [500, 1000, 5000, 10000, 15000, 30000],
-        "IPUMS-CPS": [1000, 5000, 10000, 50000, 100000, 300000, 600000, 1000000],
-        "Stackoverflow": [1000, 5000, 10000, 20000, 40000, 60000],
-        "Compas": [500, 1000, 1500, 3000, 7000, 10000],
+        "Adult": [100, 250, 500, 1000, 5000, 10000, 15000, 30000],
+        "IPUMS-CPS": [250, 500, 1000, 5000, 10000, 50000, 100000, 300000, 600000, 1000000],
+        "Stackoverflow": [250, 500, 1000, 5000, 10000, 20000, 40000, 60000],
+        "Compas": [100, 250, 500, 1000, 1500, 3000, 7000, 10000],
         "Healthcare": [100, 200, 400, 700, 1000],
     }
 
@@ -1723,7 +1723,7 @@ def run_experiment_6(
 
 
 def run_experiment_7(
-    epsilon: Optional[float]=10,
+    epsilon: Optional[float]=1.0,
     n_per_sex: int=50000,
     step: float=0.1,                    # switch 10% each iteration
     repetitions: int=10,
@@ -1737,9 +1737,6 @@ def run_experiment_7(
       - flip a fraction t of (male, income=0) to income=1
       - flip a fraction t of (female, income=1) to income=0
     So at t=1.0: all males income=1, all females income=0.
-
-    Uses your global `measures` dict (ProxyMutualInformationTVD, ProxyRepairMaxSat, TupleContribution).
-    Adds shadow bands (min..max over repetitions) for every plotted line.
     """
 
     # ---- helpers -------------------------------------------------
@@ -1851,15 +1848,15 @@ def run_experiment_7(
 
     # ---- plot ----------------------------------------------------
     plt.rcParams.update({
-        "axes.titlesize": 25,
-        "axes.labelsize": 28,
+        "axes.titlesize": 24,
+        "axes.labelsize": 26,
         "xtick.labelsize": 22,
         "ytick.labelsize": 22,
         "figure.titlesize": 34,
         "legend.fontsize": 18,
     })
 
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(8, 5))
 
     # Use DP-gap mean on x-axis (as you want)
     x = np.asarray(dp_stats["mean"], dtype=float)
@@ -1896,15 +1893,15 @@ def run_experiment_7(
 
 
 if __name__ == "__main__":
-    create_plot_0()
-    create_plot_1()
-    create_plot_2()
-    create_plot_3()
-    plot_legend()
-    run_experiment_1()
-    run_experiment_2()
-    run_experiment_3()
-    run_experiment_4()
-    run_experiment_5()
+    # create_plot_0()
+    # create_plot_1()
+    # create_plot_2()
+    # create_plot_3()
+    # plot_legend()
+    # run_experiment_1()
+    # run_experiment_2()
+    # run_experiment_3()
+    # run_experiment_4()
+    # run_experiment_5()
     run_experiment_6()
     run_experiment_7()
