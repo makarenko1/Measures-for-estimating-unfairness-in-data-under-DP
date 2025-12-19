@@ -792,7 +792,7 @@ def create_plot_3(
                     crit_label = f"{protected} , {response}"
                 with ThreadPoolExecutor() as executor:
                     try:
-                        if path == "data/stackoverflow.csv":  # Stackoverflow times out
+                        if criterion == ['Country', 'RemoteWork', 'Employment']:
                             raise TimeoutError
                         repair_regular_val = executor.submit(
                             repair_regular.calculate, fairness_criteria=[criterion], epsilon=epsilon, chunk_size=None
@@ -847,6 +847,181 @@ def create_plot_3(
 
     fig.suptitle(
         f"Comparison of regular RepairMaxSAT and RepairMaxSAT with chunks of size 100, "
+        f"{round(num_tuples / 1000)}K tuples",
+        y=1.03,
+    )
+    fig.tight_layout()
+
+    os.makedirs(os.path.dirname(outfile), exist_ok=True)
+    plt.savefig(outfile, dpi=256, bbox_inches="tight")
+    plt.show()
+
+
+def create_plot_4(
+        epsilon: float = 1.0,
+        num_tuples: int = 1000,
+        repetitions: int = 10,
+        outfile: str = "plots/plot4.png",
+):
+    """
+    For each dataset: line plot with X = fairness criteria (indexed 1..k), Y = runtime (seconds).
+    Two lines per dataset:
+      - Regular RepairMaxSAT (chunk_size=None)
+      - RepairMaxSAT with chunks (chunk_size=100)
+    Shadow bands show min..max runtime over `repetitions` for each criterion (like run_experiment_3).
+    """
+
+    plt.rcParams.update({
+        "axes.titlesize": 34,
+        "axes.labelsize": 30,
+        "xtick.labelsize": 24,
+        "ytick.labelsize": 24,
+        "figure.titlesize": 34,
+    })
+
+    fig, axes = plt.subplots(1, 5, figsize=(30, 6), sharey=False)
+    if not isinstance(axes, np.ndarray):
+        axes = np.array([axes])
+
+    for ax, (ds_name, spec) in zip(axes, datasets.items()):
+        path = spec["path"]
+        criteria = spec["criteria"]
+
+        cols_list = []
+        for criterion in criteria:
+            cols_list += criterion
+
+        df_full = _encode_and_clean(path, cols_list)
+        n = min(num_tuples, len(df_full))
+
+        # per-criterion list of runtimes (over repetitions)
+        # key = crit_label -> list[float]
+        reg_times_rep = {}
+        chk_times_rep = {}
+
+        # Initialize labels
+        crit_labels = []
+        for criterion in criteria:
+            if len(criterion) == 3:
+                protected, response, admissible = criterion
+                crit_label = f"{protected} , {response} | {admissible}"
+            else:
+                protected, response = criterion[0], criterion[1]
+                crit_label = f"{protected} , {response}"
+
+            crit_labels.append(crit_label)
+            reg_times_rep[crit_label] = []
+            chk_times_rep[crit_label] = []
+
+        # Run repetitions
+        for _ in range(repetitions):
+            df = df_full.sample(n=n, replace=False) if n < len(df_full) else df_full
+
+            repair_regular = ProxyRepairMaxSat(data=df)
+            repair_with_chunks = ProxyRepairMaxSat(data=df)
+
+            for criterion in criteria:
+                if len(criterion) == 3:
+                    protected, response, admissible = criterion
+                    crit_label = f"{protected} , {response} | {admissible}"
+                else:
+                    protected, response = criterion[0], criterion[1]
+                    crit_label = f"{protected} , {response}"
+
+                with ThreadPoolExecutor() as executor:
+                    try:
+                        if criterion == ['Country', 'RemoteWork', 'Employment']:
+                            raise TimeoutError
+                        start = time.time()
+                        _ = executor.submit(
+                            repair_regular.calculate,
+                            fairness_criteria=[criterion],
+                            epsilon=epsilon,
+                            chunk_size=None,
+                        ).result(timeout=timeout_seconds)
+                        reg_times_rep[crit_label].append(float(time.time() - start))
+                    except TimeoutError:
+                        print("Skipping regular RepairMaxSAT timing due to timeout.")
+                        reg_times_rep[crit_label].append(np.nan)
+                with ThreadPoolExecutor() as executor:
+                    try:
+                        start = time.time()
+                        _ = executor.submit(
+                            repair_with_chunks.calculate,
+                            [criterion],
+                            epsilon=epsilon,
+                            chunk_size=100,
+                        ).result(timeout=timeout_seconds)
+                        chk_times_rep[crit_label].append(float(time.time() - start))
+                    except TimeoutError:
+                        print("Skipping chunked RepairMaxSAT timing due to timeout.")
+                        chk_times_rep[crit_label].append(np.nan)
+
+        # Sort criteria labels deterministically to match your other plots
+        crit_labels_sorted = sorted(crit_labels)
+        x = np.arange(1, len(crit_labels_sorted) + 1, dtype=float)
+
+        # Aggregate mean/min/max per criterion (ignoring NaNs)
+        reg_mean, reg_min, reg_max = [], [], []
+        chk_mean, chk_min, chk_max = [], [], []
+
+        for cl in crit_labels_sorted:
+            r = np.asarray(reg_times_rep[cl], dtype=float)
+            r = r[~np.isnan(r)]
+            if r.size == 0:
+                reg_mean.append(np.nan); reg_min.append(np.nan); reg_max.append(np.nan)
+            else:
+                reg_mean.append(float(r.mean())); reg_min.append(float(r.min())); reg_max.append(float(r.max()))
+
+            c = np.asarray(chk_times_rep[cl], dtype=float)
+            c = c[~np.isnan(c)]
+            if c.size == 0:
+                chk_mean.append(np.nan); chk_min.append(np.nan); chk_max.append(np.nan)
+            else:
+                chk_mean.append(float(c.mean())); chk_min.append(float(c.min())); chk_max.append(float(c.max()))
+
+        reg_mean = np.asarray(reg_mean, dtype=float)
+        reg_min  = np.asarray(reg_min,  dtype=float)
+        reg_max  = np.asarray(reg_max,  dtype=float)
+
+        chk_mean = np.asarray(chk_mean, dtype=float)
+        chk_min  = np.asarray(chk_min,  dtype=float)
+        chk_max  = np.asarray(chk_max,  dtype=float)
+
+        # ---- plot lines + shadow bands ----
+        line_reg, = ax.plot(x, reg_mean, marker="o", linewidth=2, label="Regular RepairMaxSAT")
+        mask_reg = ~np.isnan(reg_mean) & ~np.isnan(reg_min) & ~np.isnan(reg_max)
+        if mask_reg.any():
+            ax.fill_between(
+                x[mask_reg],
+                reg_min[mask_reg],
+                reg_max[mask_reg],
+                alpha=0.2,
+                color=line_reg.get_color(),
+                linewidth=0,
+            )
+
+        line_chk, = ax.plot(x, chk_mean, marker="o", linewidth=2, label="RepairMaxSAT with chunks")
+        mask_chk = ~np.isnan(chk_mean) & ~np.isnan(chk_min) & ~np.isnan(chk_max)
+        if mask_chk.any():
+            ax.fill_between(
+                x[mask_chk],
+                chk_min[mask_chk],
+                chk_max[mask_chk],
+                alpha=0.2,
+                color=line_chk.get_color(),
+                linewidth=0,
+            )
+
+        ax.set_xlabel("criterion")
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(int(i)) for i in x])
+        ax.set_title(ds_name)
+        ax.grid(True, linestyle="--", alpha=0.4)
+
+    axes[0].set_ylabel("runtime (s)")
+    fig.suptitle(
+        f"Runtime comparison of regular RepairMaxSAT and RepairMaxSAT with chunks of size 100, "
         f"{round(num_tuples / 1000)}K tuples",
         y=1.03,
     )
@@ -997,9 +1172,8 @@ def run_experiment_1(
             flag_timeout = False
             for num_tuples in num_tuples_this_dataset:
                 if (flag_timeout or (measure_name == "Proxy RepairMaxSat" and
-                                    ((path == "data/census.csv" and num_tuples > 300000) or
-                                    (path == "data/stackoverflow.csv" and num_tuples > 40000)))):
-                    # Skip because Stackoverflow times out on more than 40K tuples and Census more than 300K
+                                    (path == "data/census.csv" and num_tuples > 600000))):
+                    # Skip because Stackoverflow times out on Census for more than 600K tuples
                     print("Skipping iteration due to timeout.")
                     results[measure_name]["mean"].append(np.nan)
                     results[measure_name]["min"].append(np.nan)
@@ -1123,9 +1297,7 @@ def run_experiment_2(
             flag_timeout = False
 
             for num_criteria in range(1, len(criteria) + 1):
-                if flag_timeout or (measure_name == "Proxy RepairMaxSat" and
-                                    (path == "data/stackoverflow.csv" and num_tuples > 40000 and num_criteria > 3)):
-                    # Skip because Stackoverflow times out on more than 40K tuples
+                if flag_timeout:
                     print("Skipping next iterations because got timeout for smaller number of criteria.")
                     results[measure_name]["mean"].append(np.nan)
                     results[measure_name]["min"].append(np.nan)
@@ -1241,9 +1413,7 @@ def run_experiment_3(
 
         for measure_name, measure_cls in measures.items():
             flag_timeout = False
-            if flag_timeout or (measure_name == "Proxy RepairMaxSat" and
-                                (path == "data/stackoverflow.csv" and num_tuples > 40000)):
-                # Skip because Stackoverflow times out on more than 40K tuples
+            if flag_timeout:
                 for _ in epsilons:
                     results[measure_name]["mean"].append(np.nan)
                     results[measure_name]["min"].append(np.nan)
@@ -1893,15 +2063,17 @@ def run_experiment_7(
 
 
 if __name__ == "__main__":
-    # create_plot_0()
-    # create_plot_1()
-    # create_plot_2()
-    # create_plot_3()
-    # plot_legend()
-    # run_experiment_1()
-    # run_experiment_2()
-    # run_experiment_3()
-    # run_experiment_4()
-    # run_experiment_5()
+    create_plot_0()
+    create_plot_1()
+    create_plot_2()
+    create_plot_3()
+    create_plot_4()
+    create_plot_3()
+    plot_legend()
+    run_experiment_1()
+    run_experiment_2()
+    run_experiment_3()
+    run_experiment_4()
+    run_experiment_5()
     run_experiment_6()
     run_experiment_7()
