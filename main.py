@@ -1040,7 +1040,7 @@ measures = {
     "Tuple Contribution": TupleContribution,
 }
 
-timeout_seconds = 1 * 60 * 60
+timeout_seconds = 2 * 60 * 60
 
 def _encode_and_clean(data_path, cols):
     """
@@ -1893,7 +1893,7 @@ def run_experiment_6(
 
 
 def run_experiment_7(
-    epsilon: Optional[float]=1.0,
+    epsilon: Optional[float]=10,
     n_per_sex: int=50000,
     step: float=0.1,                    # switch 10% each iteration
     repetitions: int=10,
@@ -2018,15 +2018,13 @@ def run_experiment_7(
 
     # ---- plot ----------------------------------------------------
     plt.rcParams.update({
-        "axes.titlesize": 24,
-        "axes.labelsize": 26,
-        "xtick.labelsize": 22,
-        "ytick.labelsize": 22,
-        "figure.titlesize": 34,
-        "legend.fontsize": 18,
+        "axes.titlesize": 20,
+        "axes.labelsize": 20,
+        "xtick.labelsize": 20,
+        "ytick.labelsize": 20,
     })
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8, 4))
 
     # Use DP-gap mean on x-axis (as you want)
     x = np.asarray(dp_stats["mean"], dtype=float)
@@ -2068,7 +2066,6 @@ if __name__ == "__main__":
     create_plot_2()
     create_plot_3()
     create_plot_4()
-    create_plot_3()
     plot_legend()
     run_experiment_1()
     run_experiment_2()
