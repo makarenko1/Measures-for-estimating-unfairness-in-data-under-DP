@@ -1893,7 +1893,7 @@ def run_experiment_6(
 
 
 def run_experiment_7(
-    epsilon: Optional[float]=1.0,
+    epsilon: Optional[float]=10,
     n_per_sex: int=50000,
     step: float=0.1,                    # switch 10% each iteration
     repetitions: int=10,
@@ -2018,15 +2018,13 @@ def run_experiment_7(
 
     # ---- plot ----------------------------------------------------
     plt.rcParams.update({
-        "axes.titlesize": 24,
-        "axes.labelsize": 26,
-        "xtick.labelsize": 22,
-        "ytick.labelsize": 22,
-        "figure.titlesize": 34,
-        "legend.fontsize": 18,
+        "axes.titlesize": 20,
+        "axes.labelsize": 20,
+        "xtick.labelsize": 20,
+        "ytick.labelsize": 20,
     })
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8, 4))
 
     # Use DP-gap mean on x-axis (as you want)
     x = np.asarray(dp_stats["mean"], dtype=float)
@@ -2063,16 +2061,16 @@ def run_experiment_7(
 
 
 if __name__ == "__main__":
-    # create_plot_0()
-    # create_plot_1()
-    # create_plot_2()
+    create_plot_0()
+    create_plot_1()
+    create_plot_2()
     create_plot_3()
-    # create_plot_4()
-    # plot_legend()
-    # run_experiment_1()
-    # run_experiment_2()
-    # run_experiment_3()
-    # run_experiment_4()
-    # run_experiment_5()
-    # run_experiment_6()
-    # run_experiment_7()
+    create_plot_4()
+    plot_legend()
+    run_experiment_1()
+    run_experiment_2()
+    run_experiment_3()
+    run_experiment_4()
+    run_experiment_5()
+    run_experiment_6()
+    run_experiment_7()
