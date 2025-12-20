@@ -930,7 +930,7 @@ def create_plot_4(
 
                 with ThreadPoolExecutor() as executor:
                     try:
-                        if criterion == ['Country', 'RemoteWork', 'Employment']:
+                        if criterion == ["Country", "RemoteWork", "Employment"]:
                             raise TimeoutError
                         start = time.time()
                         _ = executor.submit(
@@ -1040,7 +1040,7 @@ measures = {
     "Tuple Contribution": TupleContribution,
 }
 
-timeout_seconds = 1 * 60 * 60
+timeout_seconds = 2 * 60 * 60
 
 def _encode_and_clean(data_path, cols):
     """
@@ -2063,17 +2063,16 @@ def run_experiment_7(
 
 
 if __name__ == "__main__":
-    create_plot_0()
-    create_plot_1()
-    create_plot_2()
+    # create_plot_0()
+    # create_plot_1()
+    # create_plot_2()
     create_plot_3()
-    create_plot_4()
-    create_plot_3()
-    plot_legend()
-    run_experiment_1()
-    run_experiment_2()
-    run_experiment_3()
-    run_experiment_4()
-    run_experiment_5()
-    run_experiment_6()
-    run_experiment_7()
+    # create_plot_4()
+    # plot_legend()
+    # run_experiment_1()
+    # run_experiment_2()
+    # run_experiment_3()
+    # run_experiment_4()
+    # run_experiment_5()
+    # run_experiment_6()
+    # run_experiment_7()
