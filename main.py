@@ -930,7 +930,7 @@ def create_plot_4(
 
                 with ThreadPoolExecutor() as executor:
                     try:
-                        if criterion == ['Country', 'RemoteWork', 'Employment']:
+                        if criterion == ["Country", "RemoteWork", "Employment"]:
                             raise TimeoutError
                         start = time.time()
                         _ = executor.submit(
