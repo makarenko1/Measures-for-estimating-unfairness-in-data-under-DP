@@ -11,6 +11,7 @@ from matplotlib.lines import Line2D as MplLine2D
 from matplotlib.ticker import LogLocator, FuncFormatter
 from opacus import PrivacyEngine
 from diffprivlib.models import RandomForestClassifier
+from scipy.stats import kendalltau
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler
@@ -824,6 +825,8 @@ def create_plot_3(
             repair_with_chunks_vals.append(tvd_mean)
         repair_regular_vals = np.array(repair_regular_vals, dtype=float)
         repair_with_chunks_vals = np.array(repair_with_chunks_vals, dtype=float)
+        tau, _ = kendalltau(repair_regular_vals, repair_with_chunks_vals)
+        print(f"Kendall tau for {ds_name}: {tau}")
         mi_bars = ax.bar(x - width / 2, repair_regular_vals, width, label="Regular RepairMaxSAT")
         ax.bar(x + width / 2, repair_with_chunks_vals, width, label="RepairMaxSAT with chunks")
         ax.set_xlabel("criterion")
@@ -1597,6 +1600,8 @@ def run_experiment_4(
             tvd_mean = tvd_sums[cl] / tvd_counts[cl] if tvd_counts[cl] > 0 else np.nan
             mi_vals.append(mi_mean)
             tvd_vals.append(tvd_mean)
+        tau, _ = kendalltau(mi_vals, tvd_vals)
+        print(f"Kendall tau for {ds_name}: {tau}")
         mi_vals = np.array(mi_vals, dtype=float)
         tvd_vals = np.array(tvd_vals, dtype=float)
         mi_bars = ax.bar(x - width / 2, mi_vals, width, label="MutualInformation")
