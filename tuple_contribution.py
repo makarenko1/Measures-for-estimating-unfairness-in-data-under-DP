@@ -65,7 +65,7 @@ class TupleContribution:
             contribution += float(np.sum(top_k))
 
         if epsilon is not None:
-            if min_a_count is not None:
+            if min_a_count is not None and min_a_count - 1 != 0:
                 sensitivity = len(fairness_criteria) * ((4 * k / (min_a_count - 1)) + 0.5)
             else:
                 n = len(self.dataset)
