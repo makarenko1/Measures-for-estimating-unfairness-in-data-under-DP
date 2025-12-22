@@ -1639,8 +1639,8 @@ def run_experiment_4(
 
 def run_experiment_5(
     num_tuples=100000,
-    repetitions=50,
-    epsilon=1.0,
+    repetitions=10,
+    epsilon=None,
     outfile="plots/experiment5.png",
 ):
     """TupleContribution value as function of k, sampling separately for each repetition."""
@@ -2023,10 +2023,10 @@ def run_experiment_7(
 
     # ---- plot ----------------------------------------------------
     plt.rcParams.update({
-        "axes.titlesize": 20,
-        "axes.labelsize": 20,
-        "xtick.labelsize": 20,
-        "ytick.labelsize": 20,
+        "axes.titlesize": 18,
+        "axes.labelsize": 18,
+        "xtick.labelsize": 18,
+        "ytick.labelsize": 18,
     })
 
     fig, ax = plt.subplots(figsize=(8, 4))
@@ -2066,17 +2066,16 @@ def run_experiment_7(
 
 
 if __name__ == "__main__":
-    # create_plot_0()
-    # create_plot_1()
-    # create_plot_2()
-    # create_plot_3()
-    # create_plot_4()
-    # plot_legend()
-    # run_experiment_1()
-    # run_experiment_2()
-    # run_experiment_3()
-    # run_experiment_4()
-    run_experiment_7()
+    create_plot_0()
+    create_plot_1()
+    create_plot_2()
+    create_plot_3()
+    create_plot_4()
+    plot_legend()
+    run_experiment_1()
+    run_experiment_2()
+    run_experiment_3()
+    run_experiment_4()
     run_experiment_5()
-    # run_experiment_6()
-    # run_experiment_7()
+    run_experiment_6()
+    run_experiment_7()
