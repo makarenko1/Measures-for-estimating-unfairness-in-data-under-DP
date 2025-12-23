@@ -67,16 +67,15 @@ class TupleContribution:
         if epsilon is not None:
             n = len(self.dataset)
             if min_a_count is not None:
-                print(f"min_a_count: {min_a_count}")
                 sensitivity = len(fairness_criteria) * ((9 * k / n) + 0.5)
             else:
                 sensitivity = len(fairness_criteria) * ((3 * k / n) + 0.5)
             contribution = contribution + np.random.laplace(loc=0.0, scale=sensitivity / float(epsilon))
 
         elapsed_time = time.time() - start_time
-        print(f"Tuple Contribution for fairness criteria {fairness_criteria}: {contribution:.4f} with data size: "
-              f"{len(self.dataset)} and epsilon: {epsilon if epsilon is not None else 'infinity'}. Calculation took "
-              f"{elapsed_time:.3f} seconds.")
+        print(f"Tuple Contribution for fairness criteria {fairness_criteria}: {contribution:.4f} with k: {k}, "
+              f"data size: {len(self.dataset)} and epsilon: {epsilon if epsilon is not None else 'infinity'}. "
+              f"Calculation took {elapsed_time:.3f} seconds.")
         return contribution
 
     @staticmethod
