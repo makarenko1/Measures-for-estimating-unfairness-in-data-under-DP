@@ -78,7 +78,7 @@ datasets_shortened = {
 }
 
 # Formatter: round to 3 decimals, then strip trailing zeros and dot
-def _yfmt(y, pos):
+def _yfmt(y):
     s = f"{y:.3f}"
     s = s.rstrip('0').rstrip('.')
     return s
@@ -756,8 +756,8 @@ def create_plot_3(
         cols_list = []
         for criterion in criteria:
             cols_list += criterion
-        df_full = _encode_and_clean(path, cols_list)
-        n = min(num_tuples, len(df_full))
+        data = _encode_and_clean(path, cols_list)
+        n = min(num_tuples, len(data))
         repair_regular_sums = {}
         repair_with_chunks_sums = {}
         repair_regular_counts = {}
@@ -777,12 +777,9 @@ def create_plot_3(
             repair_with_chunks_counts[crit_label] = 0
 
         for _ in range(repetitions):
-            if n < len(df_full):
-                df = df_full.sample(n=n, replace=False)
-            else:
-                df = df_full
-            repair_regular = ProxyRepairMaxSat(data=df)
-            repair_with_chunks = ProxyRepairMaxSat(data=df)
+            sample = data.sample(n=n, replace=False)
+            repair_regular = ProxyRepairMaxSat(data=sample)
+            repair_with_chunks = ProxyRepairMaxSat(data=sample)
 
             for criterion in criteria:
                 if len(criterion) == 3:
@@ -894,8 +891,8 @@ def create_plot_4(
         for criterion in criteria:
             cols_list += criterion
 
-        df_full = _encode_and_clean(path, cols_list)
-        n = min(num_tuples, len(df_full))
+        data = _encode_and_clean(path, cols_list)
+        n = min(num_tuples, len(data))
 
         # per-criterion list of runtimes (over repetitions)
         # key = crit_label -> list[float]
@@ -918,10 +915,10 @@ def create_plot_4(
 
         # Run repetitions
         for _ in range(repetitions):
-            df = df_full.sample(n=n, replace=False) if n < len(df_full) else df_full
+            sample = data.sample(n=n, replace=False)
 
-            repair_regular = ProxyRepairMaxSat(data=df)
-            repair_with_chunks = ProxyRepairMaxSat(data=df)
+            repair_regular = ProxyRepairMaxSat(data=sample)
+            repair_with_chunks = ProxyRepairMaxSat(data=sample)
 
             for criterion in criteria:
                 if len(criterion) == 3:
@@ -1408,7 +1405,8 @@ def run_experiment_3(
         cols_list = []
         for criterion in criteria:
             cols_list += criterion
-        data_full = _encode_and_clean(path, cols_list)
+        data = _encode_and_clean(path, cols_list)
+        n = min(num_tuples, len(data))
         results = {
             measure_name: {"mean": [], "min": [], "max": []}
             for measure_name in measures.keys()
@@ -1424,12 +1422,8 @@ def run_experiment_3(
                 continue
 
             errs_per_eps = [[] for _ in epsilons]
-            n = min(num_tuples, len(data_full))
             for _ in range(repetitions):
-                if n < len(data_full):
-                    sample = data_full.sample(n=n, replace=False)
-                else:
-                    sample = data_full
+                sample = data.sample(n=n, replace=False)
                 m = measure_cls(data=sample)
                 with ThreadPoolExecutor() as executor:
                     try:
@@ -1536,8 +1530,8 @@ def run_experiment_4(
         cols_list = []
         for criterion in criteria:
             cols_list += criterion
-        df_full = _encode_and_clean(path, cols_list)
-        n = min(num_tuples, len(df_full))
+        data = _encode_and_clean(path, cols_list)
+        n = min(num_tuples, len(data))
         mi_sums = {}
         tvd_sums = {}
         mi_counts = {}
@@ -1557,12 +1551,9 @@ def run_experiment_4(
             tvd_counts[crit_label] = 0
 
         for _ in range(repetitions):
-            if n < len(df_full):
-                df = df_full.sample(n=n, replace=False)
-            else:
-                df = df_full
-            mi_measure = MutualInformation(data=df)
-            tvd_measure = ProxyMutualInformationTVD(data=df)
+            sample = data.sample(n=n, replace=False)
+            mi_measure = MutualInformation(data=sample)
+            tvd_measure = ProxyMutualInformationTVD(data=sample)
 
             for criterion in criteria:
                 if len(criterion) == 3:
@@ -2035,7 +2026,7 @@ def run_experiment_7(
 
     ax.set_xlabel("Demographic Parity gap")
     ax.set_yscale('symlog')
-    ax.set_ylabel("measure value (symlog scale)")
+    ax.set_ylabel("measure value (symlog)")
     ax.grid(True, linestyle="--", alpha=0.4)
     ax.yaxis.set_major_formatter(y_formatter)
 
@@ -2046,16 +2037,16 @@ def run_experiment_7(
 
 
 if __name__ == "__main__":
-    create_plot_0()
-    create_plot_1()
-    create_plot_2()
-    create_plot_3()
-    create_plot_4()
-    plot_legend()
-    run_experiment_1()
-    run_experiment_2()
-    run_experiment_3()
-    run_experiment_4()
-    run_experiment_5()
+    # create_plot_0()
+    # create_plot_1()
+    # create_plot_2()
+    # create_plot_3()
+    # create_plot_4()
+    # plot_legend()
+    # run_experiment_1()
+    # run_experiment_2()
+    # run_experiment_3()
+    # run_experiment_4()
+    # run_experiment_5()
     run_experiment_6()
-    run_experiment_7()
+    # run_experiment_7()
