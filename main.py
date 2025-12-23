@@ -1,7 +1,7 @@
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import numpy as np
 import pandas as pd
@@ -83,6 +83,144 @@ def _yfmt(y):
     s = s.rstrip('0').rstrip('.')
     return s
 y_formatter = FuncFormatter(_yfmt)
+
+
+def get_sample(
+        df: pd.DataFrame,
+        n: int,
+        fairness_criteria: List[List[str]],
+        p_start: float = 0.5,
+        p_step: float = 0.1,
+        p_cap: float = 1.0
+) -> pd.DataFrame:
+    """
+      - Build combined admissible key from all admissible columns in fairness_criteria.
+      - Inside each key-bucket, create disjoint pairs of indices.
+      - Iteratively sample pairs with probability p (increases each round) until reaching n rows.
+      - Already sampled rows never appear again (pairs are disjoint by construction).
+    Guarantees:
+      - If a key appears in the sample, it appears >=2.
+      - Therefore each admissible column's values that appear appear >=2.
+      - No "stuck" due to stranded singletons, because we only operate on pairs.
+    Raises if infeasible to reach exactly n under the constraints.
+    """
+    if n < 0:
+        raise ValueError("Sampling error: n must be nonnegative")
+    if n == 0:
+        return df.iloc[0:0].copy()
+    rng = np.random.default_rng()
+
+    # Extract admissible columns
+    admissible_cols = []
+    for crit in fairness_criteria:
+        if len(crit) not in (2, 3):
+            raise ValueError("Sampling error: each criterion must have length 2 or 3")
+        if len(crit) == 3 and crit[2] is not None:
+            admissible_cols.append(crit[2])
+
+    admissible_cols = sorted(set(admissible_cols))
+    if not admissible_cols:
+        if n > len(df):
+            raise ValueError("Sampling error: n larger than df (no replacement)")
+        return df.sample(n=n, replace=False).reset_index(drop=True)
+    for c in admissible_cols:
+        if c not in df.columns:
+            raise ValueError(f"Sampling error: Admissible column '{c}' not in df.columns")
+    if n == 1:
+        raise ValueError("Sampling error: Impossible to sample n=1 while requiring min group size >= 2")
+
+    # Build combined key
+    if len(admissible_cols) == 1:
+        key = df[admissible_cols[0]]
+    else:
+        key = df[admissible_cols].astype(object).apply(lambda r: tuple(r.values.tolist()), axis=1)
+    # Group indices by key
+    groups = df.groupby(key, dropna=False, sort=False).groups
+    # Build disjoint pairs per key-bucket
+    all_pairs = []  # list of (i, j, key_val)
+    for k_val, idxs in groups.items():
+        idxs = np.array(list(idxs))
+        if len(idxs) < 2:
+            continue
+        rng.shuffle(idxs)
+        # disjoint pairing
+        m = (len(idxs) // 2) * 2
+        for t in range(0, m, 2):
+            all_pairs.append((int(idxs[t]), int(idxs[t + 1]), k_val))
+
+    # Feasibility for even part
+    max_even = 2 * len(all_pairs)
+    if len(df) > n > max_even and n != max_even + 1:
+        # For odd n, we might be able to add one extra from a bucket with leftover
+        # but only +1 beyond max_even is possible in this disjoint-pair view.
+        raise ValueError(
+            f"Sampling error: can sample at most {max_even} rows in pairs from eligible buckets, requested n={n}."
+        )
+
+    # Iteratively sample pairs with increasing probability
+    selected = set()
+    p = float(p_start)
+    # Work on a mutable pool of pairs; once a pair is used, remove it
+    pair_pool = all_pairs.copy()
+
+    while len(selected) + 2 <= n and pair_pool:
+        rng.shuffle(pair_pool)
+        before = len(selected)
+        new_pool = []
+        for i, j, _k in pair_pool:
+            if len(selected) + 2 > n:
+                new_pool.append((i, j, _k))
+                continue
+            if i in selected or j in selected:
+                continue
+            if rng.random() < p:
+                selected.add(i)
+                selected.add(j)
+            else:
+                new_pool.append((i, j, _k))
+        pair_pool = new_pool
+
+        # Increase p each round
+        p = min(p + p_step, p_cap)
+        # If no progress and p is already 1, just take pairs deterministically
+        if len(selected) == before and abs(p - p_cap) < 1e-12:
+            for i, j, _k in pair_pool:
+                if len(selected) + 2 > n:
+                    break
+                if i in selected or j in selected:
+                    continue
+                selected.add(i)
+                selected.add(j)
+            break
+
+    # If we need one more row (odd n), add it safely from an already-present key
+    if len(df) > n > len(selected):
+        # Add 1 from any bucket whose key is already present with >=2 selected
+        selected_df = df.loc[list(selected)]
+        present_keys = set(key.loc[selected_df.index].tolist())
+
+        # Find a remaining row from any present key not yet selected
+        candidates = []
+        for k_val in present_keys:
+            idxs = np.array(list(groups.get(k_val, [])))
+            for idx in idxs:
+                idx = int(idx)
+                if idx not in selected:
+                    candidates.append(idx)
+
+        if not candidates:
+            raise ValueError("Sampling error: no extra row available in an already-present key bucket")
+        selected.add(int(rng.choice(candidates)))
+    out = df.loc[list(selected)].copy()
+
+    # Sanity check: each admissible column has min count >= 2
+    for a_col in admissible_cols:
+        vc = out[a_col].value_counts(dropna=False)
+        if len(vc) > 0 and int(vc.min()) < 2:
+            raise RuntimeError(f"Sampling error: singleton group in '{a_col}'")
+    if len(df) > n != len(out):
+        raise RuntimeError(f"Sampling error: expected n={n}, got {len(out)}")
+    return out.sample(frac=1).reset_index(drop=True)
 
 
 def create_plot_0(
@@ -338,8 +476,8 @@ def create_plot_0(
 
     for crit_idx, criterion in enumerate(criteria, start=1):
         df = pd.read_csv(path)
-        data_full = _encode_and_clean(path, df.columns)
-        n = min(num_tuples, len(data_full))
+        data = _encode_and_clean(path, df.columns)
+        n = min(num_tuples, len(data))
 
         sum_tvd = 0.0
         sum_repair = 0.0
@@ -350,7 +488,7 @@ def create_plot_0(
         sum_loss_nn = 0.0
 
         for rep in range(repetitions):
-            sample = data_full.sample(n=n, replace=False)
+            sample = get_sample(df=data, n=n, fairness_criteria=[criterion])
             sample_measures = sample[criterion]
 
             tvd_proxy = ProxyMutualInformationTVD(data=sample_measures)
@@ -777,7 +915,7 @@ def create_plot_3(
             repair_with_chunks_counts[crit_label] = 0
 
         for _ in range(repetitions):
-            sample = data.sample(n=n, replace=False)
+            sample = get_sample(df=data, n=n, fairness_criteria=criteria)
             repair_regular = ProxyRepairMaxSat(data=sample)
             repair_with_chunks = ProxyRepairMaxSat(data=sample)
 
@@ -915,8 +1053,7 @@ def create_plot_4(
 
         # Run repetitions
         for _ in range(repetitions):
-            sample = data.sample(n=n, replace=False)
-
+            sample = get_sample(df=data, n=n, fairness_criteria=criteria)
             repair_regular = ProxyRepairMaxSat(data=sample)
             repair_with_chunks = ProxyRepairMaxSat(data=sample)
 
@@ -1183,7 +1320,7 @@ def run_experiment_1(
                 runtimes_rep = []
                 for _ in range(repetitions):
                     n = min(num_tuples, len(data))
-                    sample = data.sample(n=n, replace=False)
+                    sample = get_sample(df=data, n=n, fairness_criteria=criteria)
                     m = measure_cls(data=sample)
                     start_time = time.time()
                     with ThreadPoolExecutor() as executor:
@@ -1288,6 +1425,7 @@ def run_experiment_2(
         for criterion in criteria:
             cols_list += criterion
         data = _encode_and_clean(path, cols_list)
+        n = min(num_tuples, len(data))
         results = {
             measure_name: {"mean": [], "min": [], "max": []}
             for measure_name in measures.keys()
@@ -1306,8 +1444,7 @@ def run_experiment_2(
 
                 runtimes_rep = []
                 for _ in range(repetitions):
-                    n = min(num_tuples, len(data))
-                    sample = data.sample(n=n, replace=False)
+                    sample = get_sample(df=data, n=n, fairness_criteria=criteria)
                     m = measure_cls(data=sample)
                     start_time = time.time()
                     with ThreadPoolExecutor() as executor:
@@ -1423,7 +1560,7 @@ def run_experiment_3(
 
             errs_per_eps = [[] for _ in epsilons]
             for _ in range(repetitions):
-                sample = data.sample(n=n, replace=False)
+                sample = get_sample(df=data, n=n, fairness_criteria=criteria)
                 m = measure_cls(data=sample)
                 with ThreadPoolExecutor() as executor:
                     try:
@@ -1551,7 +1688,7 @@ def run_experiment_4(
             tvd_counts[crit_label] = 0
 
         for _ in range(repetitions):
-            sample = data.sample(n=n, replace=False)
+            sample = get_sample(df=data, n=n, fairness_criteria=criteria)
             mi_measure = MutualInformation(data=sample)
             tvd_measure = ProxyMutualInformationTVD(data=sample)
 
@@ -1665,6 +1802,7 @@ def run_experiment_5(
         for criterion in criteria:
             cols_list += criterion
         data = _encode_and_clean(path, cols_list)
+        n = min(num_tuples, len(data))
         stats = {"mean": []}
 
         flag_timeout = False
@@ -1676,8 +1814,7 @@ def run_experiment_5(
 
             values_rep = []
             for _ in range(repetitions):
-                n = min(num_tuples, len(data))
-                sample = data.sample(n=n, replace=False)
+                sample = get_sample(df=data, n=n, fairness_criteria=criteria)
                 m = TupleContribution(data=sample)
                 with ThreadPoolExecutor() as executor:
                     try:
@@ -1741,139 +1878,6 @@ def run_experiment_5(
     plt.show()
 
 
-def teacher_iterative_pair_sampling(
-        df: pd.DataFrame,
-        n: int,
-        fairness_criteria,
-        *,
-        p_start: float = 0.5,
-        p_step: float = 0.1,
-        p_cap: float = 1.0,
-        random_state=None,
-        allow_odd_n: bool = True,
-) -> pd.DataFrame:
-    """
-    Teacher algorithm adapted to avoid "stuck":
-      - Build combined admissible key from all admissible columns in fairness_criteria.
-      - Inside each key-bucket, create disjoint pairs of indices.
-      - Iteratively sample pairs with probability p (increases each round) until reaching n rows.
-      - Already sampled rows never appear again (pairs are disjoint by construction).
-    Guarantees:
-      - If a key appears in the sample, it appears >=2.
-      - Therefore each admissible column's values that appear appear >=2.
-      - No "stuck" due to stranded singletons, because we only operate on pairs.
-    Raises if infeasible to reach exactly n under the constraints.
-    """
-    if n < 0:
-        raise ValueError("n must be nonnegative")
-    if n == 0:
-        return df.iloc[0:0].copy()
-    rng = np.random.default_rng(random_state)
-    # Extract admissible columns
-    admissible_cols = []
-    for crit in fairness_criteria:
-        if len(crit) not in (2, 3):
-            raise ValueError("Invalid input: each criterion must have length 2 or 3")
-        if len(crit) == 3 and crit[2] is not None:
-            admissible_cols.append(crit[2])
-    admissible_cols = sorted(set(admissible_cols))
-    if not admissible_cols:
-        if n > len(df):
-            raise ValueError("n larger than df (no replacement)")
-        return df.sample(n=n, replace=False, random_state=random_state).reset_index(drop=True)
-    for c in admissible_cols:
-        if c not in df.columns:
-            raise ValueError(f"Admissible column '{c}' not in df.columns")
-    if n == 1:
-        raise ValueError("Impossible to sample n=1 while requiring min group size >= 2")
-    # Build combined key
-    if len(admissible_cols) == 1:
-        key = df[admissible_cols[0]]
-    else:
-        key = df[admissible_cols].astype(object).apply(lambda r: tuple(r.values.tolist()), axis=1)
-    # Group indices by key
-    groups = df.groupby(key, dropna=False, sort=False).groups
-    # Build disjoint pairs per key-bucket
-    all_pairs = []  # list of (i, j, key_val)
-    for k_val, idxs in groups.items():
-        idxs = np.array(list(idxs))
-        if len(idxs) < 2:
-            continue
-        rng.shuffle(idxs)
-        # disjoint pairing
-        m = (len(idxs) // 2) * 2
-        for t in range(0, m, 2):
-            all_pairs.append((int(idxs[t]), int(idxs[t + 1]), k_val))
-    # Feasibility for even part
-    max_even = 2 * len(all_pairs)
-    if len(df) > n > max_even and not (allow_odd_n and n == max_even + 1):
-        # For odd n, we might be able to add one extra from a bucket with leftover
-        # but only +1 beyond max_even is possible in this disjoint-pair view.
-        raise ValueError(
-            f"Infeasible: can sample at most {max_even} rows in pairs from eligible buckets, requested n={n}."
-        )
-    # Iteratively sample pairs with increasing probability
-    selected = set()
-    p = float(p_start)
-    # Work on a mutable pool of pairs; once a pair is used, remove it
-    pair_pool = all_pairs.copy()
-    while len(selected) + 2 <= n and pair_pool:
-        rng.shuffle(pair_pool)
-        before = len(selected)
-        new_pool = []
-        for i, j, _k in pair_pool:
-            if len(selected) + 2 > n:
-                new_pool.append((i, j, _k))
-                continue
-            if i in selected or j in selected:
-                continue
-            if rng.random() < p:
-                selected.add(i)
-                selected.add(j)
-            else:
-                new_pool.append((i, j, _k))
-        pair_pool = new_pool
-        # increase p each round
-        p = min(p + p_step, p_cap)
-        # If no progress and p is already 1, just take pairs deterministically
-        if len(selected) == before and abs(p - p_cap) < 1e-12:
-            for i, j, _k in pair_pool:
-                if len(selected) + 2 > n:
-                    break
-                if i in selected or j in selected:
-                    continue
-                selected.add(i)
-                selected.add(j)
-            break
-    # If we need one more row (odd n), add it safely from an already-present key
-    if len(df) > n > len(selected):
-        if not allow_odd_n or (n - len(selected) != 1):
-            raise ValueError("Could not reach exactly n under constraints")
-        # Add 1 from any bucket whose key is already present with >=2 selected
-        selected_df = df.loc[list(selected)]
-        present_keys = set(key.loc[selected_df.index].tolist())
-        # Find a remaining row from any present key not yet selected
-        candidates = []
-        for k_val in present_keys:
-            idxs = np.array(list(groups.get(k_val, [])))
-            for idx in idxs:
-                idx = int(idx)
-                if idx not in selected:
-                    candidates.append(idx)
-        if not candidates:
-            raise ValueError("Odd-n top-up impossible: no extra row available in an already-present key bucket")
-        selected.add(int(rng.choice(candidates)))
-    out = df.loc[list(selected)].copy()
-    # Sanity check: each admissible column has min count >= 2
-    for a_col in admissible_cols:
-        vc = out[a_col].value_counts(dropna=False)
-        if len(vc) > 0 and int(vc.min()) < 2:
-            raise RuntimeError(f"Sampling bug: singleton group in '{a_col}'")
-    if len(df) > n != len(out):
-        raise RuntimeError(f"Sampling bug: expected n={n}, got {len(out)}")
-    return out.sample(frac=1, random_state=random_state).reset_index(drop=True)
-
-
 def run_experiment_6(
     num_tuples=100000,
     repetitions=50,
@@ -1914,21 +1918,22 @@ def run_experiment_6(
             cols_list += criterion
         data = _encode_and_clean(path, cols_list)
         n = min(num_tuples, len(data))
+        sample = get_sample(df=data, n=n, fairness_criteria=criteria)
+        m = TupleContribution(data=sample)
         stats = {"mean": [], "min": [], "max": []}
 
         for k in ks:
             errs = []
 
             for _ in range(repetitions):
-                sample = teacher_iterative_pair_sampling(df=data, n=n, fairness_criteria=criteria)
-                m = TupleContribution(data=sample)
                 with ThreadPoolExecutor() as executor:
                     try:
                         non_private_result = executor.submit(
                             m.calculate,
-                            criteria,
+                            fairness_criteria=criteria,
                             k=k,
-                            epsilon=None
+                            epsilon=None,
+                            encode_and_clean=False
                         ).result(timeout=timeout_seconds)
                     except TimeoutError:
                         print("Skipping iteration due to timeout.")
@@ -1937,9 +1942,10 @@ def run_experiment_6(
                     try:
                         private_result = executor.submit(
                             m.calculate,
-                            criteria,
+                            fairness_criteria=criteria,
                             k=k,
-                            epsilon=epsilon
+                            epsilon=epsilon,
+                            encode_and_clean=False
                         ).result(timeout=timeout_seconds)
                         errs.append(_rel_error(private_result, non_private_result))
                     except TimeoutError:
@@ -2170,16 +2176,16 @@ def run_experiment_7(
 
 
 if __name__ == "__main__":
-    # create_plot_0()
-    # create_plot_1()
-    # create_plot_2()
-    # create_plot_3()
-    # create_plot_4()
-    # plot_legend()
-    # run_experiment_1()
-    # run_experiment_2()
-    # run_experiment_3()
-    # run_experiment_4()
-    # run_experiment_5()
+    create_plot_0()
+    create_plot_1()
+    create_plot_2()
+    create_plot_3()
+    create_plot_4()
+    plot_legend()
+    run_experiment_1()
+    run_experiment_2()
+    run_experiment_3()
+    run_experiment_4()
+    run_experiment_5()
     run_experiment_6()
-    # run_experiment_7()
+    run_experiment_7()
