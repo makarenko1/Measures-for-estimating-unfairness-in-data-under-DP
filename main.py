@@ -1647,8 +1647,8 @@ def run_experiment_5(
 
     ks_per_dataset = {
         "Adult": [100, 250, 500, 1000, 5000, 10000, 15000, 30000],
-        "IPUMS-CPS": [250, 500, 1000, 5000, 10000, 50000, 100000, 300000, 600000, 1000000],
-        "Stackoverflow": [250, 500, 1000, 5000, 10000, 20000, 40000, 60000],
+        "IPUMS-CPS": [100, 250, 500, 1000, 5000, 10000, 50000, 100000, 300000, 600000, 1000000],
+        "Stackoverflow": [100, 250, 500, 1000, 5000, 10000, 20000, 40000, 60000],
         "Compas": [100, 250, 500, 1000, 1500, 3000, 7000, 10000],
         "Healthcare": [100, 200, 400, 700, 1000],
     }
@@ -1656,7 +1656,7 @@ def run_experiment_5(
     plt.rcParams.update({
         "axes.titlesize": 34,
         "axes.labelsize": 28,
-        "xtick.labelsize": 16,
+        "xtick.labelsize": 15,
         "ytick.labelsize": 22,
         "figure.titlesize": 34,
     })
@@ -1674,15 +1674,13 @@ def run_experiment_5(
         for criterion in criteria:
             cols_list += criterion
         data = _encode_and_clean(path, cols_list)
-        stats = {"mean": [], "min": [], "max": []}
+        stats = {"mean": []}
 
         flag_timeout = False
         for k in ks_this_dataset:
             if flag_timeout:
                 print("Skipping the iteration due to timeout.")
                 stats["mean"].append(np.nan)
-                stats["min"].append(np.nan)
-                stats["max"].append(np.nan)
                 continue
 
             values_rep = []
@@ -1708,34 +1706,16 @@ def run_experiment_5(
             vals = np.array(values_rep, dtype=float)
             vals = vals[~np.isnan(vals)]
             if vals.size == 0:
-                mean_v = min_v = max_v = np.nan
+                mean_v = np.nan
             else:
                 mean_v = vals.mean()
-                min_v = vals.min()
-                max_v = vals.max()
             stats["mean"].append(mean_v)
-            stats["min"].append(min_v)
-            stats["max"].append(max_v)
 
         xs = np.arange(len(ks_this_dataset))
         means = np.array(stats["mean"], dtype=float)
-        lows  = np.array(stats["min"], dtype=float)
-        highs = np.array(stats["max"], dtype=float)
         means = np.clip(means, tiny, None)
-        lows  = np.clip(lows, tiny, None)
-        highs = np.clip(highs, tiny, None)
         line, = ax.plot(xs, means, marker="o", linewidth=2,
                         label="TupleContribution value")
-        mask = ~np.isnan(means) & ~np.isnan(lows) & ~np.isnan(highs)
-        if mask.any():
-            ax.fill_between(
-                xs[mask],
-                lows[mask],
-                highs[mask],
-                alpha=0.2,
-                color=line.get_color(),
-                linewidth=0,
-            )
         tick_labels = []
         for k in ks_this_dataset:
             if k >= 1_000_000:
@@ -1780,8 +1760,8 @@ def run_experiment_6(
 
     ks_per_dataset = {
         "Adult": [100, 250, 500, 1000, 5000, 10000, 15000, 30000],
-        "IPUMS-CPS": [250, 500, 1000, 5000, 10000, 50000, 100000, 300000, 600000, 1000000],
-        "Stackoverflow": [250, 500, 1000, 5000, 10000, 20000, 40000, 60000],
+        "IPUMS-CPS": [100, 250, 500, 1000, 5000, 10000, 50000, 100000, 300000, 600000, 1000000],
+        "Stackoverflow": [100, 250, 500, 1000, 5000, 10000, 20000, 40000, 60000],
         "Compas": [100, 250, 500, 1000, 1500, 3000, 7000, 10000],
         "Healthcare": [100, 200, 400, 700, 1000],
     }
@@ -1793,7 +1773,7 @@ def run_experiment_6(
     plt.rcParams.update({
         "axes.titlesize": 28,
         "axes.labelsize": 24,
-        "xtick.labelsize": 16,
+        "xtick.labelsize": 15,
         "ytick.labelsize": 16,
     })
 
