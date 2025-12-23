@@ -1656,7 +1656,7 @@ def run_experiment_5(
     plt.rcParams.update({
         "axes.titlesize": 34,
         "axes.labelsize": 28,
-        "xtick.labelsize": 16,
+        "xtick.labelsize": 15,
         "ytick.labelsize": 22,
         "figure.titlesize": 34,
     })
@@ -1773,7 +1773,7 @@ def run_experiment_6(
     plt.rcParams.update({
         "axes.titlesize": 28,
         "axes.labelsize": 24,
-        "xtick.labelsize": 16,
+        "xtick.labelsize": 15,
         "ytick.labelsize": 16,
     })
 
