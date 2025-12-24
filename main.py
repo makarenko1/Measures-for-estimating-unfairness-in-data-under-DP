@@ -1848,23 +1848,19 @@ def run_experiment_5(
         tick_labels = []
         for k in ks_this_dataset:
             if k >= 1_000_000:
-                label = k / 1_000_000
-                label = label if label - floor(label) == 0.5 else int(label)
-                tick_labels.append(f"{label}M")
+                tick_labels.append(f"{k / 1_000_000:g}M")
             elif k >= 1_000:
-                label = k / 1_000
-                label = label if label - floor(label) == 0.5 else int(label)
-                tick_labels.append(f"{label}K")
+                tick_labels.append(f"{k / 1_000:g}K")
             else:
                 tick_labels.append(str(k))
+        ax.set_xticks(xs)
         if ds_name != "Healthcare":
-            show_idx = [i for i in range(0, len(tick_labels), 2)]
-            if len(tick_labels) - 1 not in show_idx:
-                show_idx.append(len(tick_labels) - 1)
+            show_idx = list(range(0, len(ks_this_dataset), 2))
+            if (len(ks_this_dataset) - 1) not in show_idx:
+                show_idx.append(len(ks_this_dataset) - 1)
             ax.set_xticks(np.array(show_idx))
             ax.set_xticklabels([tick_labels[i] for i in show_idx])
         else:
-            ax.set_xticks(xs)
             ax.set_xticklabels(tick_labels)
         ax.set_xlabel("k (top-k tuples)")
         ax.set_yscale('log')
@@ -1945,6 +1941,7 @@ def run_experiment_6(
                     except TimeoutError:
                         print("Skipping iteration due to timeout.")
                         errs.append(np.nan)
+                        break
                 with ThreadPoolExecutor() as executor:
                     try:
                         private_result = executor.submit(
@@ -1989,24 +1986,21 @@ def run_experiment_6(
                 linewidth=0,
             )
         tick_labels = []
-        if k >= 1_000_000:
-            label = k / 1_000_000
-            label = label if label - floor(label) == 0.5 else int(label)
-            tick_labels.append(f"{label}M")
-        elif k >= 1_000:
-            label = k / 1_000
-            label = label if label - floor(label) == 0.5 else int(label)
-            tick_labels.append(f"{label}K")
-        else:
-            tick_labels.append(str(k))
+        for k in ks:
+            if k >= 1_000_000:
+                tick_labels.append(f"{k / 1_000_000:g}M")
+            elif k >= 1_000:
+                tick_labels.append(f"{k / 1_000:g}K")
+            else:
+                tick_labels.append(str(k))
+        ax.set_xticks(xs)
         if ds_name != "Healthcare":
-            show_idx = [i for i in range(0, len(tick_labels), 2)]
-            if len(tick_labels) - 1 not in show_idx:
-                show_idx.append(len(tick_labels) - 1)
+            show_idx = list(range(0, len(ks), 2))
+            if (len(ks) - 1) not in show_idx:
+                show_idx.append(len(ks) - 1)
             ax.set_xticks(np.array(show_idx))
             ax.set_xticklabels([tick_labels[i] for i in show_idx])
         else:
-            ax.set_xticks(xs)
             ax.set_xticklabels(tick_labels)
         ax.set_xlabel("k (top-k tuples)")
         ax.set_yscale('log')
