@@ -1768,7 +1768,7 @@ def run_experiment_4(
 
 def run_experiment_5(
     num_tuples=100000,
-    repetitions=1,
+    repetitions=20,
     epsilon=None,
     outfile="plots/experiment5.png",
 ):
@@ -1785,8 +1785,8 @@ def run_experiment_5(
     plt.rcParams.update({
         "axes.titlesize": 34,
         "axes.labelsize": 28,
-        "xtick.labelsize": 17,
-        "ytick.labelsize": 18,
+        "xtick.labelsize": 16,
+        "ytick.labelsize": 17,
         "figure.titlesize": 34,
     })
 
@@ -1862,7 +1862,7 @@ def run_experiment_5(
             if len(tick_labels) - 1 not in show_idx:
                 show_idx.append(len(tick_labels) - 1)
             ax.set_xticks(np.array(show_idx))
-            ax.set_xticklabels([tick_labels[i] for i in range(0, len(tick_labels), 2)])
+            ax.set_xticklabels([tick_labels[i] for i in show_idx])
         else:
             ax.set_xticks(xs)
             ax.set_xticklabels(tick_labels)
@@ -1887,7 +1887,7 @@ def run_experiment_5(
 
 def run_experiment_6(
     num_tuples=100000,
-    repetitions=1,
+    repetitions=50,
     epsilon=1.0,
     outfile="plots/experiment6.png",
 ):
@@ -1908,8 +1908,8 @@ def run_experiment_6(
     plt.rcParams.update({
         "axes.titlesize": 28,
         "axes.labelsize": 24,
-        "xtick.labelsize": 17,
-        "ytick.labelsize": 18,
+        "xtick.labelsize": 16,
+        "ytick.labelsize": 17,
     })
 
     fig, axes = plt.subplots(1, 5, figsize=(28, 6), sharey=False)
@@ -2004,7 +2004,7 @@ def run_experiment_6(
             if len(tick_labels) - 1 not in show_idx:
                 show_idx.append(len(tick_labels) - 1)
             ax.set_xticks(np.array(show_idx))
-            ax.set_xticklabels([tick_labels[i] for i in range(0, len(tick_labels), 2)])
+            ax.set_xticklabels([tick_labels[i] for i in show_idx])
         else:
             ax.set_xticks(xs)
             ax.set_xticklabels(tick_labels)
@@ -2195,16 +2195,16 @@ def run_experiment_7(
 
 
 if __name__ == "__main__":
-    # create_plot_0()
-    # create_plot_1()
-    # create_plot_2()
-    # create_plot_3()
-    # create_plot_4()
-    # plot_legend()
-    # run_experiment_1()
-    # run_experiment_2()
-    # run_experiment_3()
-    # run_experiment_4()
+    create_plot_0()
+    create_plot_1()
+    create_plot_2()
+    create_plot_3()
+    create_plot_4()
+    plot_legend()
+    run_experiment_1()
+    run_experiment_2()
+    run_experiment_3()
+    run_experiment_4()
     run_experiment_5()
     run_experiment_6()
-    # run_experiment_7()
+    run_experiment_7()
