@@ -79,7 +79,7 @@ datasets_shortened = {
 }
 
 # Formatter: round to 3 decimals, then strip trailing zeros and dot
-def _yfmt(y):
+def _yfmt(y, pos):
     s = f"{y:.3f}"
     s = s.rstrip('0').rstrip('.')
     return s
