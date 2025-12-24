@@ -1768,7 +1768,7 @@ def run_experiment_4(
 
 def run_experiment_5(
     num_tuples=100000,
-    repetitions=20,
+    repetitions=10,
     epsilon=None,
     outfile="plots/experiment5.png",
 ):
