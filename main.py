@@ -1,6 +1,7 @@
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from math import floor
 from typing import Optional, Tuple, List
 
 import numpy as np
@@ -1774,18 +1775,18 @@ def run_experiment_5(
     """TupleContribution value as function of k, sampling separately for each repetition."""
 
     ks_per_dataset = {
-        "Adult": [100, 250, 500, 1000, 5000, 10000, 15000, 30000],
-        "IPUMS-CPS": [100, 250, 500, 1000, 5000, 10000, 50000, 100000, 300000, 600000, 1000000],
-        "Stackoverflow": [100, 250, 500, 1000, 5000, 10000, 20000, 40000, 60000],
-        "Compas": [100, 250, 500, 1000, 1500, 3000, 7000, 10000],
-        "Healthcare": [100, 200, 400, 700, 1000],
+        "Adult": [10, 50, 100, 250, 500, 1000, 5000, 10000, 15000, 30000],
+        "IPUMS-CPS": [10, 50, 100, 250, 500, 1000, 5000, 10000, 50000, 100000, 300000, 600000, 1000000],
+        "Stackoverflow": [10, 50, 100, 250, 500, 1000, 5000, 10000, 20000, 40000, 60000],
+        "Compas": [10, 50, 100, 250, 500, 1000, 1500, 3000, 7000, 10000],
+        "Healthcare": [10, 50, 100, 200, 400, 700, 1000],
     }
 
     plt.rcParams.update({
         "axes.titlesize": 34,
         "axes.labelsize": 28,
-        "xtick.labelsize": 15,
-        "ytick.labelsize": 22,
+        "xtick.labelsize": 16,
+        "ytick.labelsize": 17,
         "figure.titlesize": 34,
     })
 
@@ -1847,17 +1848,19 @@ def run_experiment_5(
         tick_labels = []
         for k in ks_this_dataset:
             if k >= 1_000_000:
-                tick_labels.append(f"{k // 1_000_000}M")
+                tick_labels.append(f"{k / 1_000_000:g}M")
             elif k >= 1_000:
-                tick_labels.append(f"{k // 1_000}K")
+                tick_labels.append(f"{k / 1_000:g}K")
             else:
                 tick_labels.append(str(k))
-        if ds_name == "IPUMS-CPS":
-            show_idx = [0, 2, 4, 6] if len(ks_this_dataset) >= 7 else list(range(len(ks_this_dataset)))
+        ax.set_xticks(xs)
+        if ds_name != "Healthcare":
+            show_idx = list(range(0, len(ks_this_dataset), 2))
+            if (len(ks_this_dataset) - 1) not in show_idx:
+                show_idx.append(len(ks_this_dataset) - 1)
             ax.set_xticks(np.array(show_idx))
             ax.set_xticklabels([tick_labels[i] for i in show_idx])
         else:
-            ax.set_xticks(xs)
             ax.set_xticklabels(tick_labels)
         ax.set_xlabel("k (top-k tuples)")
         ax.set_yscale('log')
@@ -1887,11 +1890,11 @@ def run_experiment_6(
     """Relative L1 error of TupleContribution as function of k."""
 
     ks_per_dataset = {
-        "Adult": [100, 250, 500, 1000, 5000, 10000, 15000, 30000],
-        "IPUMS-CPS": [100, 250, 500, 1000, 5000, 10000, 50000, 100000, 300000, 600000, 1000000],
-        "Stackoverflow": [100, 250, 500, 1000, 5000, 10000, 20000, 40000, 60000],
-        "Compas": [100, 250, 500, 1000, 1500, 3000, 7000, 10000],
-        "Healthcare": [100, 200, 400, 700, 1000],
+        "Adult": [10, 50, 100, 250, 500, 1000, 5000, 10000, 15000, 30000],
+        "IPUMS-CPS": [10, 50, 100, 250, 500, 1000, 5000, 10000, 50000, 100000, 300000, 600000, 1000000],
+        "Stackoverflow": [10, 50, 100, 250, 500, 1000, 5000, 10000, 20000, 40000, 60000],
+        "Compas": [10, 50, 100, 250, 500, 1000, 1500, 3000, 7000, 10000],
+        "Healthcare": [10, 50, 100, 200, 400, 700, 1000],
     }
 
     def _rel_error(x, y, tiny=1e-100):
@@ -1901,8 +1904,8 @@ def run_experiment_6(
     plt.rcParams.update({
         "axes.titlesize": 28,
         "axes.labelsize": 24,
-        "xtick.labelsize": 15,
-        "ytick.labelsize": 16,
+        "xtick.labelsize": 16,
+        "ytick.labelsize": 17,
     })
 
     fig, axes = plt.subplots(1, 5, figsize=(28, 6), sharey=False)
@@ -1938,6 +1941,7 @@ def run_experiment_6(
                     except TimeoutError:
                         print("Skipping iteration due to timeout.")
                         errs.append(np.nan)
+                        break
                 with ThreadPoolExecutor() as executor:
                     try:
                         private_result = executor.submit(
@@ -1965,30 +1969,39 @@ def run_experiment_6(
             stats["min"].append(min_v)
             stats["max"].append(max_v)
 
-        x = np.arange(len(ks))
+        xs = np.arange(len(ks))
         means = np.array(stats["mean"])
         lows  = np.array(stats["min"])
         highs = np.array(stats["max"])
-        line, = ax.plot(x, means, marker="o", linewidth=2,
+        line, = ax.plot(xs, means, marker="o", linewidth=2,
                         label="TupleContribution L1 error")
         mask = ~np.isnan(means) & ~np.isnan(lows) & ~np.isnan(highs)
         if mask.any():
             ax.fill_between(
-                x[mask],
+                xs[mask],
                 lows[mask],
                 highs[mask],
                 alpha=0.2,
                 color=line.get_color(),
                 linewidth=0,
             )
-        full_tick_labels = [str(k) if k % 1000 != 0 else f"{k // 1000}K" for k in ks]
-        if ds_name == "IPUMS-CPS":
-            show_idx = [0, 2, 4, 6] if len(ks) >= 7 else list(range(len(ks)))
+        tick_labels = []
+        for k in ks:
+            if k >= 1_000_000:
+                tick_labels.append(f"{k / 1_000_000:g}M")
+            elif k >= 1_000:
+                tick_labels.append(f"{k / 1_000:g}K")
+            else:
+                tick_labels.append(str(k))
+        ax.set_xticks(xs)
+        if ds_name != "Healthcare":
+            show_idx = list(range(0, len(ks), 2))
+            if (len(ks) - 1) not in show_idx:
+                show_idx.append(len(ks) - 1)
             ax.set_xticks(np.array(show_idx))
-            ax.set_xticklabels([full_tick_labels[i] for i in show_idx])
+            ax.set_xticklabels([tick_labels[i] for i in show_idx])
         else:
-            ax.set_xticks(x)
-            ax.set_xticklabels(full_tick_labels)
+            ax.set_xticklabels(tick_labels)
         ax.set_xlabel("k (top-k tuples)")
         ax.set_yscale('log')
         ax.set_title(ds_name)
