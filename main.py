@@ -1,6 +1,7 @@
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from math import floor
 from typing import Optional, Tuple, List
 
 import numpy as np
@@ -1767,7 +1768,7 @@ def run_experiment_4(
 
 def run_experiment_5(
     num_tuples=100000,
-    repetitions=10,
+    repetitions=1,
     epsilon=None,
     outfile="plots/experiment5.png",
 ):
@@ -1784,8 +1785,8 @@ def run_experiment_5(
     plt.rcParams.update({
         "axes.titlesize": 34,
         "axes.labelsize": 28,
-        "xtick.labelsize": 15,
-        "ytick.labelsize": 22,
+        "xtick.labelsize": 17,
+        "ytick.labelsize": 18,
         "figure.titlesize": 34,
     })
 
@@ -1847,15 +1848,21 @@ def run_experiment_5(
         tick_labels = []
         for k in ks_this_dataset:
             if k >= 1_000_000:
-                tick_labels.append(f"{k // 1_000_000}M")
+                label = k / 1_000_000
+                label = label if label - floor(label) == 0.5 else int(label)
+                tick_labels.append(f"{label}M")
             elif k >= 1_000:
-                tick_labels.append(f"{k // 1_000}K")
+                label = k / 1_000
+                label = label if label - floor(label) == 0.5 else int(label)
+                tick_labels.append(f"{label}K")
             else:
                 tick_labels.append(str(k))
-        if ds_name == "IPUMS-CPS":
-            show_idx = [0, 2, 4, 6] if len(ks_this_dataset) >= 7 else list(range(len(ks_this_dataset)))
+        if ds_name != "Healthcare":
+            show_idx = [i for i in range(0, len(tick_labels), 2)]
+            if len(tick_labels) - 1 not in show_idx:
+                show_idx.append(len(tick_labels) - 1)
             ax.set_xticks(np.array(show_idx))
-            ax.set_xticklabels([tick_labels[i] for i in show_idx])
+            ax.set_xticklabels([tick_labels[i] for i in range(0, len(tick_labels), 2)])
         else:
             ax.set_xticks(xs)
             ax.set_xticklabels(tick_labels)
@@ -1880,7 +1887,7 @@ def run_experiment_5(
 
 def run_experiment_6(
     num_tuples=100000,
-    repetitions=50,
+    repetitions=1,
     epsilon=1.0,
     outfile="plots/experiment6.png",
 ):
@@ -1901,8 +1908,8 @@ def run_experiment_6(
     plt.rcParams.update({
         "axes.titlesize": 28,
         "axes.labelsize": 24,
-        "xtick.labelsize": 15,
-        "ytick.labelsize": 16,
+        "xtick.labelsize": 17,
+        "ytick.labelsize": 18,
     })
 
     fig, axes = plt.subplots(1, 5, figsize=(28, 6), sharey=False)
@@ -1965,30 +1972,42 @@ def run_experiment_6(
             stats["min"].append(min_v)
             stats["max"].append(max_v)
 
-        x = np.arange(len(ks))
+        xs = np.arange(len(ks))
         means = np.array(stats["mean"])
         lows  = np.array(stats["min"])
         highs = np.array(stats["max"])
-        line, = ax.plot(x, means, marker="o", linewidth=2,
+        line, = ax.plot(xs, means, marker="o", linewidth=2,
                         label="TupleContribution L1 error")
         mask = ~np.isnan(means) & ~np.isnan(lows) & ~np.isnan(highs)
         if mask.any():
             ax.fill_between(
-                x[mask],
+                xs[mask],
                 lows[mask],
                 highs[mask],
                 alpha=0.2,
                 color=line.get_color(),
                 linewidth=0,
             )
-        full_tick_labels = [str(k) if k % 1000 != 0 else f"{k // 1000}K" for k in ks]
-        if ds_name == "IPUMS-CPS":
-            show_idx = [0, 2, 4, 6] if len(ks) >= 7 else list(range(len(ks)))
-            ax.set_xticks(np.array(show_idx))
-            ax.set_xticklabels([full_tick_labels[i] for i in show_idx])
+        tick_labels = []
+        if k >= 1_000_000:
+            label = k / 1_000_000
+            label = label if label - floor(label) == 0.5 else int(label)
+            tick_labels.append(f"{label}M")
+        elif k >= 1_000:
+            label = k / 1_000
+            label = label if label - floor(label) == 0.5 else int(label)
+            tick_labels.append(f"{label}K")
         else:
-            ax.set_xticks(x)
-            ax.set_xticklabels(full_tick_labels)
+            tick_labels.append(str(k))
+        if ds_name != "Healthcare":
+            show_idx = [i for i in range(0, len(tick_labels), 2)]
+            if len(tick_labels) - 1 not in show_idx:
+                show_idx.append(len(tick_labels) - 1)
+            ax.set_xticks(np.array(show_idx))
+            ax.set_xticklabels([tick_labels[i] for i in range(0, len(tick_labels), 2)])
+        else:
+            ax.set_xticks(xs)
+            ax.set_xticklabels(tick_labels)
         ax.set_xlabel("k (top-k tuples)")
         ax.set_yscale('log')
         ax.set_title(ds_name)
@@ -2176,16 +2195,16 @@ def run_experiment_7(
 
 
 if __name__ == "__main__":
-    create_plot_0()
-    create_plot_1()
-    create_plot_2()
-    create_plot_3()
-    create_plot_4()
-    plot_legend()
-    run_experiment_1()
-    run_experiment_2()
-    run_experiment_3()
-    run_experiment_4()
+    # create_plot_0()
+    # create_plot_1()
+    # create_plot_2()
+    # create_plot_3()
+    # create_plot_4()
+    # plot_legend()
+    # run_experiment_1()
+    # run_experiment_2()
+    # run_experiment_3()
+    # run_experiment_4()
     run_experiment_5()
     run_experiment_6()
-    run_experiment_7()
+    # run_experiment_7()
