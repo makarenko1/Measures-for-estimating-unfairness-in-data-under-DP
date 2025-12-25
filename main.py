@@ -1786,7 +1786,7 @@ def run_experiment_5(
         "axes.titlesize": 34,
         "axes.labelsize": 28,
         "xtick.labelsize": 16,
-        "ytick.labelsize": 17,
+        "ytick.labelsize": 18,
         "figure.titlesize": 34,
     })
 
