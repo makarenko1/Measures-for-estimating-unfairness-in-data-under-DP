@@ -1783,8 +1783,8 @@ def run_experiment_5(
     }
 
     plt.rcParams.update({
-        "axes.titlesize": 28,
-        "axes.labelsize": 24,
+        "axes.titlesize": 34,
+        "axes.labelsize": 30,
         "xtick.labelsize": 16,
         "ytick.labelsize": 18,
         "figure.titlesize": 34,
@@ -1902,8 +1902,8 @@ def run_experiment_6(
         return abs(x - y) / denom
 
     plt.rcParams.update({
-        "axes.titlesize": 28,
-        "axes.labelsize": 24,
+        "axes.titlesize": 34,
+        "axes.labelsize": 30,
         "xtick.labelsize": 16,
         "ytick.labelsize": 17,
     })
