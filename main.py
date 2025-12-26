@@ -1174,7 +1174,7 @@ def create_plot_4(
 
 measures = {
     "Proxy Mutual Information TVD": ProxyMutualInformationTVD,
-    "Proxy RepairMaxSat": ProxyRepairMaxSat,
+    # "Proxy RepairMaxSat": ProxyRepairMaxSat,
     "Tuple Contribution": TupleContribution,
 }
 
@@ -1273,6 +1273,7 @@ def run_experiment_1(
 ):
     """Plotting average runtimes over 'repetitions' repetitions per measure and dataset as function of
     the number of tuples."""
+
     num_tupless_per_dataset = {
         "Adult": [1000, 5000, 10000, 15000, 30000],
         "IPUMS-CPS": [5000, 10000, 50000, 100000, 300000, 600000, 1000000],
@@ -1374,6 +1375,9 @@ def run_experiment_1(
             means = np.array(stats["mean"])
             lows  = np.array(stats["min"])
             highs = np.array(stats["max"])
+            means = np.clip(means, 1e-3, None)
+            lows = np.clip(lows, 1e-3, None)
+            highs = np.clip(highs, 1e-3, None)
             line, = ax.plot(xs, means, marker="o", linewidth=2, label=measure_name)
             mask = ~np.isnan(means) & ~np.isnan(lows) & ~np.isnan(highs)
             if mask.any():
@@ -1407,6 +1411,7 @@ def run_experiment_2(
     outfile="plots/experiment2.png"
 ):
     """Plot average runtimes over `repetitions` per measure and dataset as function of the number of criteria."""
+
     plt.rcParams.update({
         "axes.titlesize": 34,
         "axes.labelsize": 30,
@@ -1471,7 +1476,6 @@ def run_experiment_2(
                     mean_v = vals.mean()
                     min_v = vals.min()
                     max_v = vals.max()
-
                 results[measure_name]["mean"].append(mean_v)
                 results[measure_name]["min"].append(min_v)
                 results[measure_name]["max"].append(max_v)
@@ -1484,6 +1488,9 @@ def run_experiment_2(
             means = np.array(stats["mean"])
             lows  = np.array(stats["min"])
             highs = np.array(stats["max"])
+            means = np.clip(means, 1e-3, None)
+            lows = np.clip(lows, 1e-3, None)
+            highs = np.clip(highs, 1e-3, None)
             line, = ax.plot(xs, means, marker="o", linewidth=2, label=measure_name)
             mask = ~np.isnan(means) & ~np.isnan(lows) & ~np.isnan(highs)
             if mask.any():
@@ -1521,7 +1528,7 @@ def run_experiment_3(
 ):
     """Relative L1 error as function of epsilon."""
 
-    def _rel_error(x, y, tiny=1e-100):
+    def _rel_error(x, y, tiny = 1e-100):
         denom = max(abs(y), tiny)  # ensure we do not divide by 0
         return abs(x - y) / denom
 
@@ -1607,6 +1614,9 @@ def run_experiment_3(
             means = np.array(stats["mean"])
             lows  = np.array(stats["min"])
             highs = np.array(stats["max"])
+            means = np.clip(means, 1e-3, None)
+            lows = np.clip(lows, 1e-3, None)
+            highs = np.clip(highs, 1e-3, None)
             line, = ax.plot(x, means, marker="o", linewidth=2, label=measure_name)
             mask = ~np.isnan(means) & ~np.isnan(lows) & ~np.isnan(highs)
             if mask.any():
@@ -1783,8 +1793,8 @@ def run_experiment_5(
     }
 
     plt.rcParams.update({
-        "axes.titlesize": 33,
-        "axes.labelsize": 30,
+        "axes.titlesize": 34,
+        "axes.labelsize": 29,
         "xtick.labelsize": 16,
         "ytick.labelsize": 20,
         "figure.titlesize": 34,
@@ -1793,7 +1803,6 @@ def run_experiment_5(
     fig, axes = plt.subplots(1, 5, figsize=(28, 6), sharey=False)
     if not isinstance(axes, np.ndarray):
         axes = np.array([axes])
-    tiny = 1e-100  # to avoid issues with log(0)
 
     for ax, (ds_name, spec) in zip(axes, datasets.items()):
         path = spec["path"]
@@ -1842,7 +1851,7 @@ def run_experiment_5(
 
         xs = np.arange(len(ks_this_dataset))
         means = np.array(stats["mean"], dtype=float)
-        means = np.clip(means, tiny, None)
+        means = np.clip(means, 1e-3, None)
         line, = ax.plot(xs, means, marker="o", linewidth=2,
                         label="TupleContribution value")
         tick_labels = []
@@ -1869,7 +1878,7 @@ def run_experiment_5(
         ax.set_title(ds_name)
         ax.grid(True, linestyle="--", alpha=0.4)
 
-    axes[0].set_ylabel("TupleContribution (log scale)")
+    axes[0].set_ylabel("TupleContribution, log scale")
     fig.suptitle(
         f"TupleContribution value as function of k, at most {round(num_tuples / 1000)}K tuples",
         y=1.02,
@@ -2007,7 +2016,7 @@ def run_experiment_6(
         ax.set_title(ds_name)
         ax.grid(True, linestyle="--", alpha=0.4)
 
-    axes[0].set_ylabel("relative L1 error (log scale)")
+    axes[0].set_ylabel("relative L1 error, log scale")
     fig.suptitle(
         f"Relative L1 Error of TupleContribution as Function of k, at most {round(num_tuples / 1000)}K tuples, "
         f"ε = {epsilon}",
@@ -2178,7 +2187,7 @@ def run_experiment_7(
 
     ax.set_xlabel("Demographic Parity gap")
     ax.set_yscale('symlog')
-    ax.set_ylabel("measure value (symlog)")
+    ax.set_ylabel("measure value, symlog")
     ax.grid(True, linestyle="--", alpha=0.4)
     ax.yaxis.set_major_formatter(y_formatter)
 
