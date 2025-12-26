@@ -1174,7 +1174,7 @@ def create_plot_4(
 
 measures = {
     "Proxy Mutual Information TVD": ProxyMutualInformationTVD,
-    # "Proxy RepairMaxSat": ProxyRepairMaxSat,
+    "Proxy RepairMaxSat": ProxyRepairMaxSat,
     "Tuple Contribution": TupleContribution,
 }
 
