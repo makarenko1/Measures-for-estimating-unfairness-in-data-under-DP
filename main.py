@@ -2021,7 +2021,7 @@ def run_experiment_6(
 
 
 def run_experiment_7(
-    epsilon: Optional[float]=10,
+    epsilon: Optional[float]=1.0,
     n_per_sex: int=50000,
     step: float=0.1,                    # switch 10% each iteration
     repetitions: int=10,
