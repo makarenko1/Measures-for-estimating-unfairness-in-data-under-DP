@@ -1194,7 +1194,7 @@ def _encode_and_clean(data_path, cols):
     - For categorical columns in `cols`, apply LabelEncoder.
     """
     df = pd.read_csv(data_path)
-    df = df.replace(["NA", "N/A", ""], pd.NA).dropna(subset=cols).copy()
+    df = df.replace(["NA", "N/A", ""], pd.NA).copy()
 
     # 1) Numeric: replace negative values with 0 (only in selected cols)
     for c in cols:
@@ -1223,7 +1223,9 @@ def _encode_and_clean(data_path, cols):
     # 3) Categorical: label-encode only non-numeric columns in `cols`
     for c in cols:
         if c in df.columns and not pd.api.types.is_numeric_dtype(df[c]):
-            df[c] = LabelEncoder().fit_transform(df[c].astype(str))
+            df[c] = df[c].astype("object")  # ensure object dtype
+            df[c] = df[c].fillna("Missing")  # treat NaN as a category
+            df[c] = LabelEncoder().fit_transform(df[c])
 
     return df
 
@@ -1310,9 +1312,7 @@ def run_experiment_1(
         for measure_name, measure_cls in measures.items():
             flag_timeout = False
             for num_tuples in num_tuples_this_dataset:
-                if (flag_timeout or (measure_name == "Proxy RepairMaxSat" and
-                                    (path == "data/census.csv" and num_tuples > 600000))):
-                    # Skip because Stackoverflow times out on Census for more than 600K tuples
+                if flag_timeout:
                     print("Skipping iteration due to timeout.")
                     results[measure_name]["mean"].append(np.nan)
                     results[measure_name]["min"].append(np.nan)
@@ -1439,7 +1439,7 @@ def run_experiment_2(
 
             for num_criteria in range(1, len(criteria) + 1):
                 if flag_timeout:
-                    print("Skipping next iterations because got timeout for smaller number of criteria.")
+                    print("Skipping iteration due to timeout for smaller number of criteria.")
                     results[measure_name]["mean"].append(np.nan)
                     results[measure_name]["min"].append(np.nan)
                     results[measure_name]["max"].append(np.nan)
