@@ -581,7 +581,7 @@ def create_plot_0(
     dir_name = os.path.dirname(outfile)
     if dir_name:
         os.makedirs(dir_name, exist_ok=True)
-    plt.savefig(outfile, dpi=256, bbox_inches="tight")
+    plt.savefig(outfile, dpi=600, bbox_inches="tight")
     plt.show()
 
     # ---------- demographic parity plots: RF and NN separately ----------
@@ -607,7 +607,7 @@ def create_plot_0(
     dp_dir = os.path.dirname(dp_outfile_rf)
     if dp_dir:
         os.makedirs(dp_dir, exist_ok=True)
-    plt.savefig(dp_outfile_rf, dpi=256, bbox_inches="tight")
+    plt.savefig(dp_outfile_rf, dpi=600, bbox_inches="tight")
     plt.show()
 
     # NN DP plot
@@ -624,7 +624,7 @@ def create_plot_0(
     dp_dir_nn = os.path.dirname(dp_outfile_nn)
     if dp_dir_nn:
         os.makedirs(dp_dir_nn, exist_ok=True)
-    plt.savefig(dp_outfile_nn, dpi=256, bbox_inches="tight")
+    plt.savefig(dp_outfile_nn, dpi=600, bbox_inches="tight")
     plt.show()
 
 
@@ -762,7 +762,7 @@ def create_plot_1(outfile: str="plots/plot1.png"):
             # <<< format y tick labels here
             ax.yaxis.set_major_formatter(y_formatter)
 
-    plt.savefig(outfile, dpi=220)
+    plt.savefig(outfile, dpi=600)
     plt.show()
 
 
@@ -861,7 +861,7 @@ def create_plot_2(outfile: str="plots/plot2.png"):
             ax.tick_params(axis='y', labelsize=TICK_FS)
             ax.yaxis.set_major_formatter(y_formatter)  # <<< apply formatter
 
-    plt.savefig(outfile, dpi=220)
+    plt.savefig(outfile, dpi=600)
     plt.show()
 
 
@@ -992,7 +992,7 @@ def create_plot_3(
     fig.tight_layout()
 
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
-    plt.savefig(outfile, dpi=256, bbox_inches="tight")
+    plt.savefig(outfile, dpi=600, bbox_inches="tight")
     plt.show()
 
 
@@ -1166,7 +1166,7 @@ def create_plot_4(
     fig.tight_layout()
 
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
-    plt.savefig(outfile, dpi=256, bbox_inches="tight")
+    plt.savefig(outfile, dpi=600, bbox_inches="tight")
     plt.show()
 
 
@@ -1178,7 +1178,7 @@ measures = {
     "Tuple Contribution": TupleContribution,
 }
 
-timeout_seconds = 2 * 60 * 60
+timeout_seconds = 24 * 60 * 60
 
 def _encode_and_clean(data_path, cols):
     """
@@ -1262,7 +1262,7 @@ def plot_legend(outfile="plots/legend_proxies.png"):
     )
 
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
-    plt.savefig(outfile, dpi=180, bbox_inches="tight")
+    plt.savefig(outfile, dpi=600, bbox_inches="tight")
     plt.show()
 
 
@@ -1397,7 +1397,7 @@ def run_experiment_1(
     fig.tight_layout()
 
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
-    plt.savefig(outfile, dpi=256, bbox_inches="tight")
+    plt.savefig(outfile, dpi=600, bbox_inches="tight")
     plt.show()
 
 
@@ -1510,7 +1510,7 @@ def run_experiment_2(
     fig.tight_layout()
 
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
-    plt.savefig(outfile, dpi=256, bbox_inches="tight")
+    plt.savefig(outfile, dpi=600, bbox_inches="tight")
     plt.show()
 
 
@@ -1635,7 +1635,7 @@ def run_experiment_3(
     fig.tight_layout()
 
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
-    plt.savefig(outfile, dpi=256, bbox_inches="tight")
+    plt.savefig(outfile, dpi=600, bbox_inches="tight")
     plt.show()
 
 
@@ -1763,7 +1763,7 @@ def run_experiment_4(
     fig.tight_layout()
 
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
-    plt.savefig(outfile, dpi=256, bbox_inches="tight")
+    plt.savefig(outfile, dpi=600, bbox_inches="tight")
     plt.show()
 
 
@@ -1877,7 +1877,7 @@ def run_experiment_5(
     fig.tight_layout()
 
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
-    plt.savefig(outfile, dpi=256, bbox_inches="tight")
+    plt.savefig(outfile, dpi=600, bbox_inches="tight")
     plt.show()
 
 
@@ -2016,7 +2016,7 @@ def run_experiment_6(
     fig.tight_layout()
 
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
-    plt.savefig(outfile, dpi=256, bbox_inches="tight")
+    plt.savefig(outfile, dpi=600, bbox_inches="tight")
     plt.show()
 
 
@@ -2184,7 +2184,7 @@ def run_experiment_7(
 
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     plt.tight_layout()
-    plt.savefig(outfile, dpi=256, bbox_inches="tight")
+    plt.savefig(outfile, dpi=600, bbox_inches="tight")
     plt.show()
 
 
