@@ -2,7 +2,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from math import floor
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Literal
 
 import numpy as np
 import pandas as pd
@@ -88,28 +88,36 @@ y_formatter = FuncFormatter(_yfmt)
 
 
 def get_sample(
-        df: pd.DataFrame,
-        n: int,
-        fairness_criteria: List[List[str]],
-        p_start: float = 0.5,
-        p_step: float = 0.1,
-        p_cap: float = 1.0
+    df: pd.DataFrame,
+    n: int,
+    fairness_criteria: List[List[str]],
+    p_start: float = 0.5,
+    p_step: float = 0.1,
+    p_cap: float = 1.0,
+    mode: Literal["raise", "cap", "fallback"] = "cap",
 ) -> pd.DataFrame:
     """
-      - Build combined admissible key from all admissible columns in fairness_criteria.
-      - Inside each key-bucket, create disjoint pairs of indices.
-      - Iteratively sample pairs with probability p (increases each round) until reaching n rows.
-      - Already sampled rows never appear again (pairs are disjoint by construction).
-    Guarantees:
-      - If a key appears in the sample, it appears >=2.
-      - Therefore each admissible column's values that appear appear >=2.
-      - No "stuck" due to stranded singletons, because we only operate on pairs.
-    Raises if infeasible to reach exactly n under the constraints.
+    Sampling with min-count>=2 constraint.
+
+    Primary rule (strong): build a *combined key* from all admissible columns and ensure
+    no combined-key bucket appears with size 1 in the sample (activate buckets via pairs).
+
+    If infeasible:
+      - mode="raise": raise ValueError
+      - mode="cap": set n = eligible_total (max feasible) and proceed
+      - mode="fallback": fall back to per-column constraint (each admissible column value
+        appearing in the sample must appear >=2), which can allow larger n.
+
+    Notes:
+      - With combined-key fairness, max feasible is:
+            eligible_total = sum(bucket_size for buckets with size>=2)
+      - Singleton combined-key buckets are never selectable under the strong rule.
     """
     if n < 0:
         raise ValueError("Sampling error: n must be nonnegative")
     if n == 0:
         return df.iloc[0:0].copy()
+
     rng = np.random.default_rng()
 
     # Extract admissible columns
@@ -121,57 +129,63 @@ def get_sample(
             admissible_cols.append(crit[2])
 
     admissible_cols = sorted(set(admissible_cols))
+
+    # No admissible columns => plain sample
     if not admissible_cols:
         if n > len(df):
             raise ValueError("Sampling error: n larger than df (no replacement)")
         return df.sample(n=n, replace=False).reset_index(drop=True)
+
     for c in admissible_cols:
         if c not in df.columns:
             raise ValueError(f"Sampling error: Admissible column '{c}' not in df.columns")
+
     if n == 1:
         raise ValueError("Sampling error: Impossible to sample n=1 while requiring min group size >= 2")
 
-    # Build combined key
-    if len(admissible_cols) == 1:
-        key = df[admissible_cols[0]]
-    else:
-        key = df[admissible_cols].astype(object).apply(lambda r: tuple(r.values.tolist()), axis=1)
-    # Group indices by key
+    # ----- Strong mode: combined key -----
+    def _combined_key_series(frame: pd.DataFrame) -> pd.Series:
+        if len(admissible_cols) == 1:
+            return frame[admissible_cols[0]]
+        return frame[admissible_cols].astype(object).apply(lambda r: tuple(r.values.tolist()), axis=1)
+
+    key = _combined_key_series(df)
     groups = df.groupby(key, dropna=False, sort=False).groups
-    # Build disjoint pairs per key-bucket
-    all_pairs = []  # list of (i, j, key_val)
+    eligible_total = sum(len(idxs) for idxs in groups.values() if len(idxs) >= 2)
+
+    if n > eligible_total:
+        if mode == "cap":
+            n = eligible_total
+        elif mode == "fallback":
+            return _get_sample_per_column_min(df, n, admissible_cols, rng)
+        else:
+            raise ValueError(
+                f"Sampling error: can sample at most {eligible_total} rows from buckets with size>=2, requested n={n}."
+            )
+
+    # Build disjoint pairs per combined-key bucket
+    all_pairs = []
     for k_val, idxs in groups.items():
         idxs = np.array(list(idxs))
         if len(idxs) < 2:
             continue
         rng.shuffle(idxs)
-        # disjoint pairing
         m = (len(idxs) // 2) * 2
         for t in range(0, m, 2):
             all_pairs.append((int(idxs[t]), int(idxs[t + 1]), k_val))
 
-    # Feasibility for even part
-    max_even = 2 * len(all_pairs)
-    if len(df) > n > max_even and n != max_even + 1:
-        # For odd n, we might be able to add one extra from a bucket with leftover
-        # but only +1 beyond max_even is possible in this disjoint-pair view.
-        raise ValueError(
-            f"Sampling error: can sample at most {max_even} rows in pairs from eligible buckets, requested n={n}."
-        )
-
-    # Iteratively sample pairs with increasing probability
+    # Pair-sampling loop
     selected = set()
     p = float(p_start)
-    # Work on a mutable pool of pairs; once a pair is used, remove it
     pair_pool = all_pairs.copy()
 
     while len(selected) + 2 <= n and pair_pool:
         rng.shuffle(pair_pool)
         before = len(selected)
         new_pool = []
-        for i, j, _k in pair_pool:
+        for i, j, k_val in pair_pool:
             if len(selected) + 2 > n:
-                new_pool.append((i, j, _k))
+                new_pool.append((i, j, k_val))
                 continue
             if i in selected or j in selected:
                 continue
@@ -179,12 +193,11 @@ def get_sample(
                 selected.add(i)
                 selected.add(j)
             else:
-                new_pool.append((i, j, _k))
+                new_pool.append((i, j, k_val))
         pair_pool = new_pool
 
-        # Increase p each round
         p = min(p + p_step, p_cap)
-        # If no progress and p is already 1, just take pairs deterministically
+
         if len(selected) == before and abs(p - p_cap) < 1e-12:
             for i, j, _k in pair_pool:
                 if len(selected) + 2 > n:
@@ -195,33 +208,178 @@ def get_sample(
                 selected.add(j)
             break
 
-    # If we need one more row (odd n), add it safely from an already-present key
-    if len(df) > n > len(selected):
-        # Add 1 from any bucket whose key is already present with >=2 selected
-        selected_df = df.loc[list(selected)]
-        present_keys = set(key.loc[selected_df.index].tolist())
+    # Top up from already-present combined-key buckets
+    if len(selected) < n:
+        present_keys = set(key.loc[list(selected)].tolist())
 
-        # Find a remaining row from any present key not yet selected
         candidates = []
         for k_val in present_keys:
-            idxs = np.array(list(groups.get(k_val, [])))
-            for idx in idxs:
+            for idx in groups.get(k_val, []):
                 idx = int(idx)
                 if idx not in selected:
                     candidates.append(idx)
 
-        if not candidates:
-            raise ValueError("Sampling error: no extra row available in an already-present key bucket")
-        selected.add(int(rng.choice(candidates)))
+        rng.shuffle(candidates)
+        need = n - len(selected)
+        selected.update(candidates[:need])
+
+        if len(selected) != n:
+            # Still feasible overall, but we didn't activate enough buckets.
+            # Deterministically activate more buckets to finish.
+            # (Add one new pair from any unused bucket, then top up again.)
+            unused_pairs = [(i, j, k) for (i, j, k) in all_pairs if (i not in selected and j not in selected)]
+            rng.shuffle(unused_pairs)
+            for i, j, k_val in unused_pairs:
+                if len(selected) + 2 > n:
+                    break
+                selected.add(i)
+                selected.add(j)
+
+                # refresh present keys and candidates
+                present_keys.add(k_val)
+                for idx in groups.get(k_val, []):
+                    idx = int(idx)
+                    if idx not in selected:
+                        candidates.append(idx)
+
+                if len(selected) >= n:
+                    break
+
+            rng.shuffle(candidates)
+            need = n - len(selected)
+            selected.update(candidates[:need])
+
+            if len(selected) != n:
+                raise ValueError(
+                    f"Sampling error: feasible overall (eligible_total={eligible_total}) but couldn't construct n={n} "
+                    f"under combined-key rule (got {len(selected)})."
+                )
+
     out = df.loc[list(selected)].copy()
 
-    # Sanity check: each admissible column has min count >= 2
+    # Sanity check per admissible column: values that appear must appear >=2
     for a_col in admissible_cols:
         vc = out[a_col].value_counts(dropna=False)
         if len(vc) > 0 and int(vc.min()) < 2:
             raise RuntimeError(f"Sampling error: singleton group in '{a_col}'")
-    if len(df) > n != len(out):
+
+    if len(out) != n:
         raise RuntimeError(f"Sampling error: expected n={n}, got {len(out)}")
+
+    return out.sample(frac=1).reset_index(drop=True)
+
+
+def _get_sample_per_column_min(
+    df: pd.DataFrame,
+    n: int,
+    admissible_cols: List[str],
+    rng: np.random.Generator
+) -> pd.DataFrame:
+    """
+    Fallback sampler: ensures for EACH admissible column independently,
+    any value that appears in the sample appears at least twice.
+
+    This is weaker than combined-key fairness, but often matches "fairness per attribute".
+    Greedy constructive algorithm:
+      - maintain a pool of eligible rows; when we pick a row, we also pick a "buddy" row
+        that matches it on all admissible cols where possible.
+      - if exact buddy on all cols not available, we enforce per-column min2 by tracking counts
+        and preferentially picking rows that avoid creating singletons.
+    """
+    if n > len(df):
+        raise ValueError("Sampling error: n larger than df (no replacement)")
+
+    if n == 1:
+        raise ValueError("Sampling error: Impossible to sample n=1 while requiring min group size >= 2")
+
+    # Precompute value->indices per column
+    col_to_val_idxs = {}
+    for c in admissible_cols:
+        m = {}
+        for v, idxs in df.groupby(c, dropna=False, sort=False).groups.items():
+            m[v] = np.array(list(idxs), dtype=int)
+        col_to_val_idxs[c] = m
+
+    # Values that are singletons in any column can never appear (would force count 1)
+    forbidden = set()
+    for c in admissible_cols:
+        for v, idxs in col_to_val_idxs[c].items():
+            if len(idxs) < 2:
+                forbidden.update(int(i) for i in idxs)
+
+    eligible_idxs = [i for i in range(len(df)) if i not in forbidden]
+    if n > len(eligible_idxs):
+        raise ValueError(
+            f"Sampling error (fallback): can sample at most {len(eligible_idxs)} rows after removing per-column singletons, requested n={n}."
+        )
+
+    # Start by sampling pairs of the same combined vector of admissible values (best effort)
+    key = df[admissible_cols].astype(object).apply(lambda r: tuple(r.values.tolist()), axis=1)
+    groups = df.iloc[eligible_idxs].groupby(key.iloc[eligible_idxs], dropna=False, sort=False).groups
+
+    selected = set()
+    # activate by pairs from exact combined buckets first
+    group_items = list(groups.items())
+    rng.shuffle(group_items)
+    for _k, idxs in group_items:
+        idxs = list(idxs)
+        if len(selected) + 2 > n:
+            break
+        if len(idxs) >= 2:
+            rng.shuffle(idxs)
+            a, b = int(idxs.pop()), int(idxs.pop())
+            if a in selected or b in selected:
+                continue
+            selected.add(a); selected.add(b)
+
+    # Top up one-by-one but avoid creating singletons per column
+    counts = {c: {} for c in admissible_cols}
+    def add_counts(i: int):
+        for c in admissible_cols:
+            v = df.at[i, c]
+            counts[c][v] = counts[c].get(v, 0) + 1
+
+    for i in selected:
+        add_counts(i)
+
+    remaining = [i for i in eligible_idxs if i not in selected]
+    rng.shuffle(remaining)
+
+    def would_create_singleton(i: int) -> bool:
+        # If adding i would introduce a value with count 0 and we might never add a second,
+        # we mitigate by requiring that value has at least one other remaining row.
+        for c in admissible_cols:
+            v = df.at[i, c]
+            if counts[c].get(v, 0) == 0:
+                # Need at least one other row left with same value
+                idxs = col_to_val_idxs[c].get(v, np.array([], dtype=int))
+                exists_other = any((int(j) not in selected and int(j) != i) for j in idxs)
+                if not exists_other:
+                    return True
+        return False
+
+    while len(selected) < n and remaining:
+        i = int(remaining.pop())
+        if i in selected:
+            continue
+        if would_create_singleton(i):
+            continue
+        selected.add(i)
+        add_counts(i)
+
+    if len(selected) != n:
+        raise ValueError(
+            f"Sampling error (fallback): couldn't reach n={n} while maintaining per-column min2 (got {len(selected)})."
+        )
+
+    out = df.loc[list(selected)].copy()
+
+    # Sanity check per column min2
+    for c in admissible_cols:
+        vc = out[c].value_counts(dropna=False)
+        if len(vc) > 0 and int(vc.min()) < 2:
+            raise RuntimeError(f"Sampling error (fallback): singleton group in '{c}'")
+
     return out.sample(frac=1).reset_index(drop=True)
 
 
@@ -2844,19 +3002,19 @@ def run_experiment_10(
 
 
 if __name__ == "__main__":
-    # create_plot_0()
-    # create_plot_1()
-    # create_plot_2()
-    # create_plot_3()
-    # create_plot_4()
-    # plot_legend()
-    # run_experiment_1()
-    # run_experiment_2()
-    # run_experiment_3()
-    # run_experiment_4()
-    # run_experiment_5()
-    # run_experiment_6()
-    # run_experiment_7()
+    create_plot_0()
+    create_plot_1()
+    create_plot_2()
+    create_plot_3()
+    create_plot_4()
+    plot_legend()
+    run_experiment_1()
+    run_experiment_2()
+    run_experiment_3()
+    run_experiment_4()
+    run_experiment_5()
+    run_experiment_6()
+    run_experiment_7()
     run_experiment_8()
     run_experiment_9()
     run_experiment_10()
