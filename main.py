@@ -13,6 +13,7 @@ from matplotlib.ticker import LogLocator, FuncFormatter
 from opacus import PrivacyEngine
 from diffprivlib.models import RandomForestClassifier
 from scipy.stats import kendalltau
+from sklearn.linear_model import LinearRegression
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler
@@ -1428,7 +1429,7 @@ def plot_legend(outfile="plots/legend_proxies.png"):
 
 def run_experiment_1(
     epsilon=1.0,
-    repetitions=5,
+    repetitions=10,
     outfile="plots/experiment1.png"
 ):
     """Plotting average runtimes over 'repetitions' repetitions per measure and dataset as function of
@@ -1562,7 +1563,7 @@ def run_experiment_1(
 def run_experiment_2(
     epsilon=1.0,
     num_tuples=100000,
-    repetitions=5,
+    repetitions=10,
     outfile="plots/experiment2.png"
 ):
     """Plot average runtimes over `repetitions` per measure and dataset as function of the number of criteria."""
@@ -1675,7 +1676,7 @@ def run_experiment_2(
 def run_experiment_3(
     epsilons=(0.1, 1, 5, 10),
     num_tuples=100000,
-    repetitions=5,
+    repetitions=10,
     outfile="plots/experiment3.png"
 ):
     """Relative L1 error as function of epsilon."""
@@ -2345,18 +2346,675 @@ def run_experiment_7(
     plt.savefig(outfile, dpi=600, bbox_inches="tight")
     plt.show()
 
+def run_experiment_8(
+    dataset_name: str = "Adult",
+    response_col: str = "income>50K",
+    num_tuples: int = 100000,
+    repetitions: int = 10,
+    complexity_grid=(5, 10, 20, 40, 80, 120, 160),  # epochs for NN, trees for RF
+    epsilon: Optional[float] = 10.0,
+    outfile: str = "plots/experiment8.png",
+):
+    """
+    Plot:
+        X-axis: model complexity (epochs for NN / number of trees for RF)
+        Y-axis: test accuracy
+
+    Both trained privately if epsilon is not None.
+    """
+
+    path = datasets[dataset_name]["path"]
+    raw_df = pd.read_csv(path)
+    data = _encode_and_clean(path, raw_df.columns)
+
+    n = min(num_tuples, len(data))
+
+    # Store stats
+    nn_acc_stats = {"mean": [], "min": [], "max": []}
+    rf_acc_stats = {"mean": [], "min": [], "max": []}
+
+    for k in complexity_grid:
+        nn_acc_rep, rf_acc_rep = [], []
+
+        for _ in range(repetitions):
+            sample = get_sample(
+                df=data,
+                n=n,
+                fairness_criteria=datasets[dataset_name]["criteria"]
+            )
+
+            feature_cols = [c for c in sample.columns if c != response_col]
+            X = sample[feature_cols].to_numpy(dtype=float)
+            y_raw = sample[response_col].to_numpy()
+
+            le = LabelEncoder()
+            y = le.fit_transform(y_raw).astype(np.int64)
+
+            scaler = MinMaxScaler()
+            X = scaler.fit_transform(X)
+
+            strat = y if len(np.unique(y)) > 1 else None
+
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, stratify=strat
+            )
+
+            # =======================
+            # ===== Random Forest ===
+            # =======================
+            rf = RandomForestClassifier(
+                n_estimators=int(k),
+                max_depth=15,
+                shuffle=True,
+                classes=[0, 1],
+                epsilon=epsilon,
+            )
+            rf.fit(X_train, y_train)
+            rf_pred = rf.predict(X_test)
+            rf_acc = accuracy_score(y_test, rf_pred)
+            rf_acc_rep.append(rf_acc)
+
+            # =======================
+            # ===== Neural Network ==
+            # =======================
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+            X_train_t = torch.tensor(X_train, dtype=torch.float32)
+            y_train_t = torch.tensor(y_train, dtype=torch.long)
+            X_test_t = torch.tensor(X_test, dtype=torch.float32).to(device)
+
+            train_ds = TensorDataset(X_train_t, y_train_t)
+            batch_size = min(256, len(train_ds))
+            train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+
+            class SimpleNN(nn.Module):
+                def __init__(self, d_in, d_hidden=64, num_classes=2):
+                    super().__init__()
+                    self.net = nn.Sequential(
+                        nn.Linear(d_in, d_hidden),
+                        nn.ReLU(),
+                        nn.Linear(d_hidden, num_classes),
+                    )
+
+                def forward(self, x):
+                    return self.net(x)
+
+            model = SimpleNN(X_train.shape[1], 64, len(np.unique(y))).to(device)
+            criterion = nn.CrossEntropyLoss()
+            optimizer = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9)
+
+            if epsilon is not None:
+                privacy_engine = PrivacyEngine()
+                model, optimizer, train_loader = privacy_engine.make_private_with_epsilon(
+                    module=model,
+                    optimizer=optimizer,
+                    data_loader=train_loader,
+                    target_epsilon=float(epsilon),
+                    target_delta=1e-5,
+                    epochs=int(k),
+                    max_grad_norm=1.0,
+                )
+
+            model.train()
+            for _ in range(int(k)):
+                for xb, yb in train_loader:
+                    xb, yb = xb.to(device), yb.to(device)
+                    optimizer.zero_grad()
+                    loss = criterion(model(xb), yb)
+                    loss.backward()
+                    optimizer.step()
+
+            model.eval()
+            with torch.no_grad():
+                nn_pred = torch.argmax(model(X_test_t), dim=1).cpu().numpy()
+            nn_acc = accuracy_score(y_test, nn_pred)
+            nn_acc_rep.append(nn_acc)
+
+        # aggregate stats
+        for arr, stats in [
+            (rf_acc_rep, rf_acc_stats),
+            (nn_acc_rep, nn_acc_stats),
+        ]:
+            arr = np.asarray(arr, dtype=float)
+            stats["mean"].append(float(arr.mean()))
+            stats["min"].append(float(arr.min()))
+            stats["max"].append(float(arr.max()))
+
+        print(f"k={k} | RF acc={np.mean(rf_acc_rep):.4f}, NN acc={np.mean(nn_acc_rep):.4f}")
+
+    # =======================
+    # ======= PLOT ==========
+    # =======================
+    plt.rcParams.update({
+        "axes.titlesize": 20,
+        "axes.labelsize": 24,
+        "xtick.labelsize": 18,
+        "ytick.labelsize": 18,
+    })
+
+    x = np.array(complexity_grid, dtype=float)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    # --- Random Forest (purple)
+    ax.plot(
+        x,
+        rf_acc_stats["mean"],
+        marker="o",
+        linewidth=2,
+        color="purple",
+        label="Random Forest",
+    )
+    ax.fill_between(
+        x,
+        rf_acc_stats["min"],
+        rf_acc_stats["max"],
+        alpha=0.2,
+        color="purple",
+    )
+
+    # --- Neural Network (grey)
+    ax.plot(
+        x,
+        nn_acc_stats["mean"],
+        marker="o",
+        linewidth=2,
+        color="grey",
+        label="Neural Network",
+    )
+    ax.fill_between(
+        x,
+        nn_acc_stats["min"],
+        nn_acc_stats["max"],
+        alpha=0.2,
+        color="grey",
+    )
+
+    ax.set_xlabel("complexity (epochs or trees)")
+    ax.set_ylabel("test accuracy")
+    ax.set_title(f"Accuracy vs Complexity ({dataset_name}, ε={epsilon})")
+    ax.grid(True, linestyle="--", alpha=0.4)
+
+    os.makedirs(os.path.dirname(outfile), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(outfile, dpi=600, bbox_inches="tight")
+    plt.show()
+
+
+def run_experiment_9(
+    dataset_name: str = "Adult",
+    num_tuples: int = 100000,
+    repetitions: int = 10,
+    epsilon: Optional[float] = 10.0,
+    outfile_csv: str = "plots/experiment9_table.csv",
+):
+    """
+    Experiment 9 (table):
+    Show how unfairness can bias *data analysis queries* for the same (sex, income) criterion by printing
+    (and saving) a table of metrics.
+
+    We compute, per repetition, and then aggregate mean/min/max:
+
+    A) Central tendency query:
+        - median(income) overall and by sex
+        - WSD_median = max_g |median_all - median_g|
+
+    B) Tail query:
+        - p90(income) overall and by sex
+        - tail_ratio = p90_all / (median_all + tiny)
+        - WSD_p90 = max_g |p90_all - p90_g|
+
+    C) Structural query:
+        - regression coefficient beta from income ~ covariate (chosen automatically)
+          overall and by sex
+        - WSD_beta = max_g |beta_all - beta_g|
+        - sign_flip = whether beta differs in sign across sexes
+
+    Also prints unfairness-measure values for the (sex, income_binary) criterion:
+        - ProxyMutualInformationTVD
+        - ProxyRepairMaxSat
+        - TupleContribution
+
+    Notes:
+    - We will try to find sex column among ["sex","SEX"].
+    - We will try to find a numeric income column in ["INCTOT","income","Income","annual_income","income_num"].
+      If none exists, we fall back to response column "income>50K" if present (binary).
+    - For fairness measures, if income is continuous, we derive a binary label income_bin = 1[income > threshold]
+      where threshold is 50,000 if values look like dollars; otherwise median threshold.
+    """
+
+    # ---- locate dataset path ----
+    if dataset_name not in datasets:
+        raise ValueError(f"Unknown dataset_name='{dataset_name}'. Choose from {list(datasets.keys())}")
+    path = datasets[dataset_name]["path"]
+
+    # ---- load + encode ----
+    raw_df = pd.read_csv(path)
+    cols = list(raw_df.columns)
+    data = _encode_and_clean(path, cols)
+
+    n = min(num_tuples, len(data))
+    if n < 50:
+        raise ValueError(f"Too few rows after cleaning (n={n}). Increase num_tuples or check missingness.")
+
+    # ---- choose columns robustly ----
+    def _pick_first_existing(candidates):
+        for c in candidates:
+            if c in data.columns:
+                return c
+        return None
+
+    sex_col = _pick_first_existing(["sex", "SEX"])
+    if sex_col is None:
+        raise ValueError(f"Could not find a sex column in dataset. Tried ['sex','SEX']. Columns: {list(data.columns)}")
+
+    # Prefer a *numeric* income if present; else fall back to income>50K if present
+    income_col = _pick_first_existing(["INCTOT", "income", "Income", "annual_income", "income_num"])
+    if income_col is None:
+        if "income>50K" in data.columns:
+            income_col = "income>50K"
+        else:
+            raise ValueError(
+                "Could not find an income column. "
+                "Tried ['INCTOT','income','Income','annual_income','income_num'] and fallback 'income>50K'."
+            )
+
+    # Choose a regression covariate that exists and is not sex or income
+    covar_candidates = [
+        "education-num", "EDUC", "AGE", "hours-per-week", "YearsCodePro", "EdLevel"
+    ]
+    covar_col = None
+    for c in covar_candidates:
+        if c in data.columns and c not in (sex_col, income_col):
+            covar_col = c
+            break
+    if covar_col is None:
+        # fallback: any other numeric-ish column
+        other_cols = [c for c in data.columns if c not in (sex_col, income_col)]
+        if not other_cols:
+            raise ValueError("No covariate available for regression after excluding sex and income.")
+        covar_col = other_cols[0]
+
+    # ---- income handling (continuous vs binary) ----
+    income_vals = data[income_col].to_numpy(dtype=float)
+
+    # If income is basically binary already
+    uniq_income = np.unique(income_vals[~np.isnan(income_vals)])
+    is_income_binary = (len(uniq_income) <= 2)
+
+    # Build binary income label for fairness measures
+    # If values look like dollars (max > 1000), use 50,000 threshold; else use median.
+    if is_income_binary:
+        income_bin = income_vals.astype(int)
+        threshold = None
+    else:
+        vmax = float(np.nanmax(income_vals)) if np.isfinite(income_vals).any() else 0.0
+        if vmax > 1000.0:
+            threshold = 50000.0
+        else:
+            threshold = float(np.nanmedian(income_vals))
+        income_bin = (income_vals > threshold).astype(int)
+
+    # ---- metrics helpers ----
+    tiny = 1e-12
+
+    def _safe_percentile(x, q):
+        x = np.asarray(x, dtype=float)
+        x = x[np.isfinite(x)]
+        if x.size == 0:
+            return np.nan
+        return float(np.percentile(x, q))
+
+    def _safe_median(x):
+        x = np.asarray(x, dtype=float)
+        x = x[np.isfinite(x)]
+        if x.size == 0:
+            return np.nan
+        return float(np.median(x))
+
+    def _group_values(df, group_col, value_col):
+        out = {}
+        for g, grp in df.groupby(group_col):
+            out[g] = grp[value_col].to_numpy(dtype=float)
+        return out
+
+    def _wsd(overall_val, group_vals_dict):
+        diffs = []
+        for g, v in group_vals_dict.items():
+            if np.isfinite(v):
+                diffs.append(abs(overall_val - v))
+        return float(np.nanmax(diffs)) if diffs else np.nan
+
+    def _reg_beta(df, y_col, x_col):
+        # simple OLS: y ~ x (1D)
+        y = df[y_col].to_numpy(dtype=float)
+        x = df[x_col].to_numpy(dtype=float)
+
+        mask = np.isfinite(y) & np.isfinite(x)
+        y = y[mask]
+        x = x[mask]
+        if y.size < 5 or np.unique(x).size < 2:
+            return np.nan
+
+        # scale x for stability
+        x = x.reshape(-1, 1)
+        x = MinMaxScaler().fit_transform(x)
+
+        model = LinearRegression()
+        model.fit(x, y)
+        return float(model.coef_[0])
+
+    # ---- run repetitions ----
+    rows_rep = []
+
+    for rep in range(repetitions):
+        # sample (keeps your admissible constraints; criteria list not required here)
+        sample = get_sample(df=data, n=n, fairness_criteria=datasets[dataset_name]["criteria"])
+
+        # attach derived income_bin column for fairness measures
+        sample = sample.copy()
+        if "income_bin__exp9" in sample.columns:
+            sample = sample.drop(columns=["income_bin__exp9"])
+        if is_income_binary and income_col == "income>50K":
+            # already binary; use directly
+            sample["income_bin__exp9"] = sample[income_col].astype(int)
+        else:
+            vals = sample[income_col].to_numpy(dtype=float)
+            if threshold is None:
+                # binary but not the named Adult column
+                sample["income_bin__exp9"] = vals.astype(int)
+            else:
+                sample["income_bin__exp9"] = (vals > threshold).astype(int)
+
+        # --- Query 1: median ---
+        med_all = _safe_median(sample[income_col].to_numpy(dtype=float))
+        med_by = {}
+        for g, arr in _group_values(sample, sex_col, income_col).items():
+            med_by[g] = _safe_median(arr)
+        wsd_median = _wsd(med_all, med_by)
+
+        # --- Query 2: p90 and tail ratio ---
+        p90_all = _safe_percentile(sample[income_col].to_numpy(dtype=float), 90)
+        p90_by = {}
+        for g, arr in _group_values(sample, sex_col, income_col).items():
+            p90_by[g] = _safe_percentile(arr, 90)
+        wsd_p90 = _wsd(p90_all, p90_by)
+        tail_ratio = float(p90_all / (med_all + tiny)) if np.isfinite(p90_all) and np.isfinite(med_all) else np.nan
+
+        # --- Query 3: regression beta ---
+        beta_all = _reg_beta(sample, income_col, covar_col)
+        beta_by = {}
+        for g, grp in sample.groupby(sex_col):
+            beta_by[g] = _reg_beta(grp, income_col, covar_col)
+        wsd_beta = _wsd(beta_all, beta_by)
+
+        # sign flip across groups?
+        betas = [b for b in beta_by.values() if np.isfinite(b)]
+        sign_flip = False
+        if len(betas) >= 2:
+            sign_flip = (np.nanmin(betas) < 0) and (np.nanmax(betas) > 0)
+
+        # --- unfairness measures for (sex, income_bin) ---
+        # Build criterion with your naming: [protected, response]
+        fairness_criterion = [sex_col, "income_bin__exp9"]
+        fairness_df = sample[[sex_col, "income_bin__exp9"]].copy()
+
+        tvd_val = float(ProxyMutualInformationTVD(data=fairness_df).calculate([fairness_criterion], epsilon=epsilon))
+        repair_val = float(ProxyRepairMaxSat(data=fairness_df).calculate([fairness_criterion], epsilon=epsilon))
+        tc_val = float(TupleContribution(data=fairness_df).calculate([fairness_criterion], epsilon=epsilon))
+
+        row = {
+            "rep": rep + 1,
+            "dataset": dataset_name,
+            "sex_col": sex_col,
+            "income_col": income_col,
+            "covariate": covar_col,
+            "income_threshold": (threshold if threshold is not None else "binary/NA"),
+            # unfairness measures
+            "ProxyMutualInformationTVD": tvd_val,
+            "ProxyRepairMaxSat": repair_val,
+            "TupleContribution": tc_val,
+            # Query 1
+            "median_all": med_all,
+            "median_group_min": float(np.nanmin(list(med_by.values()))) if med_by else np.nan,
+            "median_group_max": float(np.nanmax(list(med_by.values()))) if med_by else np.nan,
+            "WSD_median": wsd_median,
+            # Query 2
+            "p90_all": p90_all,
+            "p90_group_min": float(np.nanmin(list(p90_by.values()))) if p90_by else np.nan,
+            "p90_group_max": float(np.nanmax(list(p90_by.values()))) if p90_by else np.nan,
+            "tail_ratio_p90_over_median": tail_ratio,
+            "WSD_p90": wsd_p90,
+            # Query 3
+            "beta_all_income~covar": beta_all,
+            "beta_group_min": float(np.nanmin(list(beta_by.values()))) if beta_by else np.nan,
+            "beta_group_max": float(np.nanmax(list(beta_by.values()))) if beta_by else np.nan,
+            "WSD_beta": wsd_beta,
+            "beta_sign_flip": bool(sign_flip),
+        }
+        rows_rep.append(row)
+
+    df_rep = pd.DataFrame(rows_rep)
+
+    # ---- aggregate mean/min/max across repetitions for a compact table ----
+    metric_cols = [
+        "ProxyMutualInformationTVD", "ProxyRepairMaxSat", "TupleContribution",
+        "median_all", "median_group_min", "median_group_max", "WSD_median",
+        "p90_all", "p90_group_min", "p90_group_max", "tail_ratio_p90_over_median", "WSD_p90",
+        "beta_all_income~covar", "beta_group_min", "beta_group_max", "WSD_beta",
+    ]
+
+    agg = []
+    for c in metric_cols:
+        vals = pd.to_numeric(df_rep[c], errors="coerce")
+        agg.append({
+            "metric": c,
+            "mean": float(vals.mean(skipna=True)),
+            "min": float(vals.min(skipna=True)),
+            "max": float(vals.max(skipna=True)),
+        })
+
+    df_agg = pd.DataFrame(agg)
+
+    # Also show how often sign flips happen
+    flip_rate = float(df_rep["beta_sign_flip"].mean()) if "beta_sign_flip" in df_rep else np.nan
+    df_flip = pd.DataFrame([{"metric": "beta_sign_flip_rate", "mean": flip_rate, "min": flip_rate, "max": flip_rate}])
+    df_agg = pd.concat([df_agg, df_flip], ignore_index=True)
+
+    # ---- print tables ----
+    print("\n=== Experiment 9: per-repetition metrics (first 10 rows) ===")
+    with pd.option_context("display.max_columns", 200, "display.width", 200):
+        print(df_rep.head(10))
+
+    print("\n=== Experiment 9: aggregated metrics over repetitions (mean/min/max) ===")
+    with pd.option_context("display.max_rows", 200, "display.width", 200):
+        print(df_agg)
+
+    # ---- save ----
+    os.makedirs(os.path.dirname(outfile_csv), exist_ok=True)
+    df_rep.to_csv(outfile_csv, index=False)
+    df_agg.to_csv(outfile_csv.replace(".csv", "_agg.csv"), index=False)
+    print(f"\nSaved: {outfile_csv}")
+    print(f"Saved: {outfile_csv.replace('.csv', '_agg.csv')}")
+
+    return df_rep, df_agg
+
+def run_experiment_10(
+    step: float = 0.1,
+    n_per_sex: int = 100000,
+    repetitions: int = 10,
+    outfile: str = "plots/experiment10_mi_vs_tvd_no_noise.png",
+):
+    """
+    Experiment 10 (synthetic, NO-NOISE):
+    Measure *true* MutualInformation (MI) vs ProxyMutualInformationTVD (TVD proxy)
+    on the same synthetic 2x2 dataset used in run_experiment_7, while we increase unfairness.
+
+    - We keep the same unfairness construction:
+        Start fair: P(income=1|sex=0)=0.5, P(income=1|sex=1)=0.5
+        Increase t in [0,1] by 'step':
+            flip t fraction of (male, income=0) -> income=1
+            flip t fraction of (female, income=1) -> income=0
+      At t=1: males always income=1, females always income=0.
+
+    - For each t, we compute over 'repetitions':
+        * MI(sex ; income>50K) with epsilon=None
+        * TVD proxy on [sex, income>50K] with epsilon=None
+        * DP-gap (as a sanity x-axis / interpretability)
+      We plot MI and TVD vs DP-gap, with min..max shadow bands.
+    """
+
+    # --- helpers -------------------------------------------------
+    def _make_dataset(t: float) -> pd.DataFrame:
+        """
+        Create synthetic dataset for a given unfairness level t in [0,1].
+        sex: 1=male, 0=female
+        income: 1=income>50K, 0=otherwise
+        """
+        n = int(n_per_sex)
+
+        # Base fair allocation:
+        m0 = n // 2
+        m1 = n - m0
+        f0 = n // 2
+        f1 = n - f0
+
+        flip_m = int(round(t * m0))  # male: 0 -> 1
+        flip_f = int(round(t * f1))  # female: 1 -> 0
+
+        m0_new = m0 - flip_m
+        m1_new = m1 + flip_m
+        f1_new = f1 - flip_f
+        f0_new = f0 + flip_f
+
+        sex = np.concatenate([
+            np.ones(m0_new + m1_new, dtype=int),   # males = 1
+            np.zeros(f0_new + f1_new, dtype=int),  # females = 0
+        ])
+        income = np.concatenate([
+            np.concatenate([np.zeros(m0_new, dtype=int), np.ones(m1_new, dtype=int)]),
+            np.concatenate([np.zeros(f0_new, dtype=int), np.ones(f1_new, dtype=int)]),
+        ])
+
+        df = pd.DataFrame({"sex": sex, "income>50K": income})
+        df = df.sample(frac=1.0, replace=False).reset_index(drop=True)
+        return df
+
+    def _dp_gap(df: pd.DataFrame) -> float:
+        rates = df.groupby("sex")["income>50K"].mean()
+        return float(abs(rates.max() - rates.min())) if len(rates) else 0.0
+
+    # --- grid ----------------------------------------------------
+    ts = [round(i * step, 10) for i in range(int(1 / step) + 1)]
+    criterion = ["sex", "income>50K"]
+
+    # store per-t stats
+    mi_stats = {"mean": [], "min": [], "max": []}
+    tvd_stats = {"mean": [], "min": [], "max": []}
+    dp_stats = {"mean": [], "min": [], "max": []}
+
+    # --- run -----------------------------------------------------
+    for t in ts:
+        mi_rep = []
+        tvd_rep = []
+        dp_rep = []
+
+        for _ in range(repetitions):
+            df = _make_dataset(t)
+
+            # NO NOISE: epsilon=None
+            mi_val = MutualInformation(data=df[criterion].copy()).calculate([criterion], epsilon=None)
+            tvd_val = ProxyMutualInformationTVD(data=df[criterion].copy()).calculate([criterion], epsilon=None)
+
+            mi_rep.append(float(mi_val))
+            tvd_rep.append(float(tvd_val))
+            dp_rep.append(_dp_gap(df))
+
+        mi_arr = np.asarray(mi_rep, dtype=float)
+        tvd_arr = np.asarray(tvd_rep, dtype=float)
+        dp_arr = np.asarray(dp_rep, dtype=float)
+
+        mi_stats["mean"].append(float(np.nanmean(mi_arr)))
+        mi_stats["min"].append(float(np.nanmin(mi_arr)))
+        mi_stats["max"].append(float(np.nanmax(mi_arr)))
+
+        tvd_stats["mean"].append(float(np.nanmean(tvd_arr)))
+        tvd_stats["min"].append(float(np.nanmin(tvd_arr)))
+        tvd_stats["max"].append(float(np.nanmax(tvd_arr)))
+
+        dp_stats["mean"].append(float(np.nanmean(dp_arr)))
+        dp_stats["min"].append(float(np.nanmin(dp_arr)))
+        dp_stats["max"].append(float(np.nanmax(dp_arr)))
+
+        print(
+            f"t={t:.1f}  DP-gap≈{dp_stats['mean'][-1]:.3f}  "
+            f"MI≈{mi_stats['mean'][-1]:.6f}  TVD≈{tvd_stats['mean'][-1]:.6f}"
+        )
+
+    # --- plot ----------------------------------------------------
+    plt.rcParams.update({
+        "axes.titlesize": 20,
+        "axes.labelsize": 30,
+        "xtick.labelsize": 18,
+        "ytick.labelsize": 18,
+    })
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    x = np.asarray(dp_stats["mean"], dtype=float)
+
+    # MI line + shadow
+    mi_mean = np.asarray(mi_stats["mean"], dtype=float)
+    mi_min  = np.asarray(mi_stats["min"], dtype=float)
+    mi_max  = np.asarray(mi_stats["max"], dtype=float)
+
+    line_mi, = ax.plot(x, mi_mean, marker="o", linewidth=2, label="MutualInformation (no noise)")
+    mask_mi = ~np.isnan(x) & ~np.isnan(mi_min) & ~np.isnan(mi_max)
+    if mask_mi.any():
+        ax.fill_between(
+            x[mask_mi], mi_min[mask_mi], mi_max[mask_mi],
+            alpha=0.2, color=line_mi.get_color(), linewidth=0
+        )
+
+    # TVD proxy line + shadow
+    tvd_mean = np.asarray(tvd_stats["mean"], dtype=float)
+    tvd_min  = np.asarray(tvd_stats["min"], dtype=float)
+    tvd_max  = np.asarray(tvd_stats["max"], dtype=float)
+
+    line_tvd, = ax.plot(x, tvd_mean, marker="o", linewidth=2,
+                        label="ProxyMutualInformationTVD (no noise)")
+    mask_tvd = ~np.isnan(x) & ~np.isnan(tvd_min) & ~np.isnan(tvd_max)
+    if mask_tvd.any():
+        ax.fill_between(
+            x[mask_tvd], tvd_min[mask_tvd], tvd_max[mask_tvd],
+            alpha=0.2, color=line_tvd.get_color(), linewidth=0
+        )
+
+    ax.set_xlabel("Demographic Parity gap")
+    ax.set_ylabel("measure value")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.set_title("MI vs TVD proxy on synthetic data (no noise)")
+
+    os.makedirs(os.path.dirname(outfile), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(outfile, dpi=600, bbox_inches="tight")
+    plt.show()
+
 
 if __name__ == "__main__":
-    # create_plot_0()
-    # create_plot_1()
-    # create_plot_2()
-    # create_plot_3()
-    # create_plot_4()
-    # plot_legend()
+    create_plot_0()
+    create_plot_1()
+    create_plot_2()
+    create_plot_3()
+    create_plot_4()
+    plot_legend()
     run_experiment_1()
     run_experiment_2()
     run_experiment_3()
-    # run_experiment_4()
-    # run_experiment_5()
-    # run_experiment_6()
-    # run_experiment_7()
+    run_experiment_4()
+    run_experiment_5()
+    run_experiment_6()
+    run_experiment_7()
+    run_experiment_8()
+    run_experiment_9()
+    run_experiment_10()
