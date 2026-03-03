@@ -2348,7 +2348,7 @@ def run_experiment_8(
     dataset_name: str = "Adult",
     response_col: str = "income>50K",
     protected_col: str = "sex",
-    num_tuples: int = 10000,
+    num_tuples: int = 100000,
     repetitions: int = 10,
     complexity_grid=(1, 2, 3, 4, 5),          # layers for NN, trees for RF
     nn_epochs: int = 20,                      # fixed training epochs for NN (complexity is layers)
@@ -2641,42 +2641,78 @@ def run_experiment_8(
 def run_experiment_9(
     dataset_name: str = "IPUMS-CPS",
     num_tuples: int = 100000,
-    repetitions: int = 1,
-    epsilon=None,  # <= None means NO NOISE for measures
+    repetitions: int = 10,                  # default 10
+    epsilon: Optional[float] = 10.0,         # default 10 (set None for NO NOISE)
     outfile_csv_queries: str = "plots/experiment9_census_queries.csv",
     outfile_csv_measures: str = "plots/experiment9_census_measures.csv",
-    outfile_png_measures: str = "plots/experiment9_census_measures.png",
 ):
     """
-    Experiment 9 (Census) — analysis queries + measure scores.
+    Experiment 9 (Census) — averaged analysis queries + averaged measure scores.
 
-    Part A (analysis queries):
-        - avg INCTOT overall
-        - avg INCTOT by SEX
-        - avg INCTOT by RACE
-        - avg INCTOT by (EDUC, SEX)   [sex given education]
-        - avg INCTOT by (EDUC, RACE)  [race given education]
+    Part A (analysis queries), averaged across repetitions:
+        1) avg INCTOT (overall)
+        2) avg INCTOT | EDUC
+        3) avg INCTOT | SEX
+        4) avg INCTOT | RACE
+        5) avg INCTOT | (EDUC, SEX)
+        6) avg INCTOT | (EDUC, RACE)
 
-    Output: outfile_csv_queries (long format):
-        rep, query, group_a, group_b, avg_inctot, n_group, avg_all, n_total
+    Output: outfile_csv_queries (long format, averaged):
+        query, group_a, group_b, avg_inctot
 
-    Part B (measure scores; separate table + table-plot):
-        mutual information, tvd, repair, contribution for:
+        Conventions:
+          - overall row uses group_a="ALL", group_b="ALL"
+          - single conditioning uses group_b=""
+          - (EDUC, SEX): group_a=EDUC, group_b=SEX
+          - (EDUC, RACE): group_a=EDUC, group_b=RACE
+
+    Part B (measure scores), averaged across repetitions:
+        MI / TVD / Repair / TupleContribution for:
             - [SEX, INCTOT]
             - [RACE, INCTOT]
             - [SEX, INCTOT, EDUC]
             - [RACE, INCTOT, EDUC]
 
-    Output: outfile_csv_measures and outfile_png_measures
+    Output: outfile_csv_measures:
+        criterion, MutualInformation, ProxyMutualInformationTVD, ProxyRepairMaxSat, TupleContribution
     """
+    import os
+    import numpy as np
+    import pandas as pd
 
-    # --- dataset must be census.csv (IPUMS-CPS in your mapping) ---
+    # ---------------- helpers ----------------
+    def _safe_mean(x):
+        x = np.asarray(x, dtype=float)
+        x = x[np.isfinite(x)]
+        return float(np.mean(x)) if x.size else np.nan
+
+    def _write_csv_strict(df: pd.DataFrame, path: str) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            df.to_csv(path, index=False)
+        except PermissionError as e:
+            raise PermissionError(
+                f"Permission denied writing '{path}'. "
+                f"Close the file in Excel/other programs, or choose a different output path."
+            ) from e
+
+    def _densify_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Make every column dense-coded 0..k-1 to prevent np.bincount explosions
+        inside TupleContribution / similar measures.
+        """
+        out = df.copy()
+        for c in out.columns:
+            codes, _ = pd.factorize(out[c], sort=False)
+            out[c] = codes.astype(np.int64)
+        return out
+
+    # ---------------- load data ----------------
     if dataset_name not in datasets:
         raise ValueError(f"Unknown dataset_name='{dataset_name}'. Choose from {list(datasets.keys())}")
 
     path = datasets[dataset_name]["path"]
     if os.path.basename(path) != "census.csv":
-        # You asked explicitly for census.csv; this ensures correct dataset is used
         raise ValueError(
             f"Expected census.csv for this experiment, but got path='{path}'. "
             f"Use dataset_name='IPUMS-CPS' (or update datasets[...] mapping)."
@@ -2694,13 +2730,9 @@ def run_experiment_9(
     if n < 50:
         raise ValueError(f"Too few rows after cleaning (n={n}). Increase num_tuples.")
 
-    def _safe_mean(x):
-        x = np.asarray(x, dtype=float)
-        x = x[np.isfinite(x)]
-        return float(np.mean(x)) if x.size else np.nan
-
     # =========================
-    # Part A: analysis queries
+    # Part A: analysis queries (collect per-rep, then average)
+    # Output columns: query, EDUC, SEX, RACE, avg_inctot
     # =========================
     rows_q = []
 
@@ -2708,85 +2740,68 @@ def run_experiment_9(
         sample = get_sample(
             df=data,
             n=n,
-            fairness_criteria=datasets[dataset_name]["criteria"],  # keep your sampling constraints
+            fairness_criteria=datasets[dataset_name]["criteria"],
         ).copy()
 
-        # INCTOT is already discretized in _encode_and_clean for census.csv, but still numeric
         sample["INCTOT"] = sample["INCTOT"].astype(float)
 
+        def add_row(query: str, educ, sex, race, avg_val: float):
+            rows_q.append({
+                "query": query,
+                "EDUC": educ,
+                "SEX": sex,
+                "RACE": race,
+                "avg_inctot": float(avg_val),
+            })
+
+        # 1) overall
         avg_all = _safe_mean(sample["INCTOT"].to_numpy())
-        n_total = int(len(sample))
+        add_row("avg INCTOT (overall)", "ALL", "ALL", "ALL", avg_all)
 
-        # Q0: overall
-        rows_q.append({
-            "rep": rep + 1,
-            "query": "avg INCTOT (overall)",
-            "group_a": "ALL",
-            "group_b": "ALL",
-            "avg_inctot": avg_all,
-            "n_group": n_total,
-            "avg_all": avg_all,
-            "n_total": n_total,
-        })
+        # 2) avg INCTOT | EDUC
+        for educ_val, grp in sample.groupby("EDUC"):
+            add_row("avg INCTOT | EDUC", educ_val, "", "", _safe_mean(grp["INCTOT"].to_numpy()))
 
-        # Q1: by SEX
+        # 3) avg INCTOT | SEX
         for sex_val, grp in sample.groupby("SEX"):
-            rows_q.append({
-                "rep": rep + 1,
-                "query": "avg INCTOT | SEX",
-                "group_a": sex_val,
-                "group_b": "",
-                "avg_inctot": _safe_mean(grp["INCTOT"].to_numpy()),
-                "n_group": int(len(grp)),
-                "avg_all": avg_all,
-                "n_total": n_total,
-            })
+            add_row("avg INCTOT | SEX", "", sex_val, "", _safe_mean(grp["INCTOT"].to_numpy()))
 
-        # Q2: by RACE
+        # 4) avg INCTOT | RACE
         for race_val, grp in sample.groupby("RACE"):
-            rows_q.append({
-                "rep": rep + 1,
-                "query": "avg INCTOT | RACE",
-                "group_a": race_val,
-                "group_b": "",
-                "avg_inctot": _safe_mean(grp["INCTOT"].to_numpy()),
-                "n_group": int(len(grp)),
-                "avg_all": avg_all,
-                "n_total": n_total,
-            })
+            add_row("avg INCTOT | RACE", "", "", race_val, _safe_mean(grp["INCTOT"].to_numpy()))
 
-        # Q3: by (EDUC, SEX)  => sex given education
+        # 5) avg INCTOT | (EDUC, SEX)
         for (educ_val, sex_val), grp in sample.groupby(["EDUC", "SEX"]):
-            rows_q.append({
-                "rep": rep + 1,
-                "query": "avg INCTOT | (EDUC, SEX)",
-                "group_a": educ_val,   # EDUC
-                "group_b": sex_val,    # SEX
-                "avg_inctot": _safe_mean(grp["INCTOT"].to_numpy()),
-                "n_group": int(len(grp)),
-                "avg_all": avg_all,
-                "n_total": n_total,
-            })
+            add_row("avg INCTOT | (EDUC, SEX)", educ_val, sex_val, "", _safe_mean(grp["INCTOT"].to_numpy()))
 
-        # Q4: by (EDUC, RACE) => race given education
+        # 6) avg INCTOT | (EDUC, RACE)
         for (educ_val, race_val), grp in sample.groupby(["EDUC", "RACE"]):
-            rows_q.append({
-                "rep": rep + 1,
-                "query": "avg INCTOT | (EDUC, RACE)",
-                "group_a": educ_val,    # EDUC
-                "group_b": race_val,    # RACE
-                "avg_inctot": _safe_mean(grp["INCTOT"].to_numpy()),
-                "n_group": int(len(grp)),
-                "avg_all": avg_all,
-                "n_total": n_total,
-            })
+            add_row("avg INCTOT | (EDUC, RACE)", educ_val, "", race_val, _safe_mean(grp["INCTOT"].to_numpy()))
 
-        print(f"rep={rep+1}/{repetitions} | avg_all(INCTOT)={avg_all:.2f}")
+        print(f"rep={rep + 1}/{repetitions} | avg_all(INCTOT)={avg_all:.2f}")
+
+    df_queries_raw = pd.DataFrame(rows_q)
+
+    # Average across repetitions for identical groups (same query + EDUC/SEX/RACE)
+    df_queries = (
+        df_queries_raw
+        .groupby(["query", "EDUC", "SEX", "RACE"], as_index=False)
+        .agg(avg_inctot=("avg_inctot", "mean"))
+        .sort_values(["query", "EDUC", "SEX", "RACE"], kind="stable")
+        .reset_index(drop=True)
+    )
+
+    # Print (shows the group columns explicitly)
+    print("\n=== Experiment 9: averaged query results (first 40 rows) ===")
+    with pd.option_context("display.max_rows", 200, "display.max_columns", 20, "display.width", 200):
+        print(df_queries.head(40))
+
+    _write_csv_strict(df_queries, outfile_csv_queries)
+    print(f"Saved: {outfile_csv_queries}")
 
     # =========================
-    # Part B: measure scores (TABLE ONLY)
+    # Part B: measure scores (averaged; table only)
     # =========================
-
     criteria = [
         ["SEX", "INCTOT"],
         ["RACE", "INCTOT"],
@@ -2795,24 +2810,19 @@ def run_experiment_9(
     ]
 
     rows_m = []
-
     for crit in criteria:
-        crit_label = (
-            f"{crit[0]}, {crit[1]}"
-            if len(crit) == 2
-            else f"{crit[0]}, {crit[1]} | {crit[2]}"
-        )
+        crit_label = f"{crit[0]}, {crit[1]}" if len(crit) == 2 else f"{crit[0]}, {crit[1]} | {crit[2]}"
 
         mi_vals, tvd_vals, repair_vals, tc_vals = [], [], [], []
-
-        for rep in range(repetitions):
+        for _ in range(repetitions):
             sample = get_sample(
                 df=data,
                 n=n,
                 fairness_criteria=datasets[dataset_name]["criteria"],
             ).copy()
 
-            sub = sample[crit].copy()
+            # critical: densify before measures to avoid huge bincount allocations
+            sub = _densify_columns(sample[crit].copy())
 
             mi_vals.append(float(MutualInformation(data=sub).calculate([crit], epsilon=epsilon)))
             tvd_vals.append(float(ProxyMutualInformationTVD(data=sub).calculate([crit], epsilon=epsilon)))
@@ -2828,10 +2838,7 @@ def run_experiment_9(
         })
 
     df_measures = pd.DataFrame(rows_m)
-
-    # Save clean numeric table
-    os.makedirs(os.path.dirname(outfile_csv_measures), exist_ok=True)
-    df_measures.to_csv(outfile_csv_measures, index=False)
+    _write_csv_strict(df_measures, outfile_csv_measures)
 
 
 def run_experiment_10(
@@ -2997,19 +3004,20 @@ def run_experiment_10(
 
 
 if __name__ == "__main__":
-    create_plot_0()
-    create_plot_1()
-    create_plot_2()
-    create_plot_3()
-    create_plot_4()
-    plot_legend()
-    run_experiment_1()
-    run_experiment_2()
-    run_experiment_3()
-    run_experiment_4()
-    run_experiment_5()
-    run_experiment_6()
-    run_experiment_7()
-    run_experiment_8()
+    # create_plot_0()
+    # create_plot_1()
+    # create_plot_2()
+    # create_plot_3()
+    # create_plot_4()
+    # plot_legend()
+    # run_experiment_1()
+    # run_experiment_2()
+    # run_experiment_3()
+    # run_experiment_4()
+    # run_experiment_5()
+    # run_experiment_6()
+    # run_experiment_7()
+    # run_experiment_8()
     run_experiment_9()
-    run_experiment_10()
+    run_experiment_8()
+    # run_experiment_10()
