@@ -2639,55 +2639,33 @@ def run_experiment_8(
 
 
 def run_experiment_9(
-    dataset_name: str = "IPUMS-CPS",
+    dataset_name: str = "Adult",
     num_tuples: int = 100000,
-    repetitions: int = 10,                  # default 10
-    epsilon: Optional[float] = 10.0,         # default 10 (set None for NO NOISE)
-    outfile_csv_queries: str = "plots/experiment9_census_queries.csv",
-    outfile_csv_measures: str = "plots/experiment9_census_measures.csv",
+    repetitions: int = 10,
+    epsilon: Optional[float] = 10.0,
+    outfile_csv_summary: str = "plots/experiment9_adult_summary.csv",
+    outfile_csv_kendall: str = "plots/experiment9_adult_kendall.csv",
 ):
     """
-    Experiment 9 (Census) — averaged analysis queries + averaged measure scores.
+    Experiment 9 (Adult):
+    Show that when query answers reveal stronger disparities in the probability of
+    high income across groups, the unfairness measures also become larger.
 
-    Part A (analysis queries), averaged across repetitions:
-        1) avg INCTOT (overall)
-        2) avg INCTOT | EDUC
-        3) avg INCTOT | SEX
-        4) avg INCTOT | RACE
-        5) avg INCTOT | (EDUC, SEX)
-        6) avg INCTOT | (EDUC, RACE)
+    Prints only:
+      1) QUERY DISPARITY VS MEASURES
+      2) KENDALL TAU WITH QUERY DISPARITY
 
-    Output: outfile_csv_queries (long format, averaged):
-        query, group_a, group_b, avg_inctot
-
-        Conventions:
-          - overall row uses group_a="ALL", group_b="ALL"
-          - single conditioning uses group_b=""
-          - (EDUC, SEX): group_a=EDUC, group_b=SEX
-          - (EDUC, RACE): group_a=EDUC, group_b=RACE
-
-    Part B (measure scores), averaged across repetitions:
-        MI / TVD / Repair / TupleContribution for:
-            - [SEX, INCTOT]
-            - [RACE, INCTOT]
-            - [SEX, INCTOT, EDUC]
-            - [RACE, INCTOT, EDUC]
-
-    Output: outfile_csv_measures:
-        criterion, MutualInformation, ProxyMutualInformationTVD, ProxyRepairMaxSat, TupleContribution
+    Saves:
+      - outfile_csv_summary
+      - outfile_csv_kendall
     """
-    import os
-    import numpy as np
-    import pandas as pd
 
     # ---------------- helpers ----------------
-    def _safe_mean(x):
-        x = np.asarray(x, dtype=float)
-        x = x[np.isfinite(x)]
-        return float(np.mean(x)) if x.size else np.nan
 
     def _write_csv_strict(df: pd.DataFrame, path: str) -> None:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        dir_name = os.path.dirname(path)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
         try:
             df.to_csv(path, index=False)
         except PermissionError as e:
@@ -2697,32 +2675,94 @@ def run_experiment_9(
             ) from e
 
     def _densify_columns(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Make every column dense-coded 0..k-1 to prevent np.bincount explosions
-        inside TupleContribution / similar measures.
-        """
         out = df.copy()
         for c in out.columns:
             codes, _ = pd.factorize(out[c], sort=False)
             out[c] = codes.astype(np.int64)
         return out
 
+    def _criterion_label(crit):
+        if len(crit) == 2:
+            return f"{crit[0]}, {crit[1]}"
+        return f"{crit[0]}, {crit[1]} | {crit[2]}"
+
+    def _query_string(crit):
+        if len(crit) == 2:
+            s, y = crit
+            return f"SELECT {s}, AVG({y}) AS rate_{y} FROM {dataset_name} GROUP BY {s};"
+        s, y, a = crit
+        return f"SELECT {a}, {s}, AVG({y}) AS rate_{y} FROM {dataset_name} GROUP BY {a}, {s};"
+
+    def _unconditional_story_stats(sample: pd.DataFrame, s_col: str, y_col: str):
+        """
+        disparity = sum_s Pr(S=s) * |Pr(Y=1|S=s) - Pr(Y=1)|
+        """
+        overall_rate = float(sample[y_col].mean())
+        grouped = sample.groupby(s_col)[y_col]
+        means = grouped.mean()
+        counts = grouped.size()
+        weights = counts / counts.sum()
+
+        disparity = float((weights * (means - overall_rate).abs()).sum())
+
+        return {
+            "min_group_rate": float(means.min()) if len(means) else np.nan,
+            "max_group_rate": float(means.max()) if len(means) else np.nan,
+            "query_disparity": disparity,
+        }
+
+    def _conditional_story_stats(sample: pd.DataFrame, s_col: str, y_col: str, a_col: str):
+        """
+        disparity =
+          sum_a Pr(A=a) * sum_s Pr(S=s|A=a) * |Pr(Y=1|S=s,A=a) - Pr(Y=1|A=a)|
+        """
+        total = len(sample)
+        disparity = 0.0
+        subgroup_rates = []
+
+        for _, grp_a in sample.groupby(a_col):
+            if len(grp_a) == 0:
+                continue
+
+            mean_a = float(grp_a[y_col].mean())
+            grouped = grp_a.groupby(s_col)[y_col]
+            means = grouped.mean()
+            counts = grouped.size()
+            weights = counts / counts.sum()
+
+            subgroup_rates.extend(means.tolist())
+
+            weight_a = len(grp_a) / total
+            disparity_a = float((weights * (means - mean_a).abs()).sum())
+            disparity += weight_a * disparity_a
+
+        return {
+            "min_group_rate": float(np.min(subgroup_rates)) if subgroup_rates else np.nan,
+            "max_group_rate": float(np.max(subgroup_rates)) if subgroup_rates else np.nan,
+            "query_disparity": float(disparity),
+        }
+
     # ---------------- load data ----------------
+
     if dataset_name not in datasets:
         raise ValueError(f"Unknown dataset_name='{dataset_name}'. Choose from {list(datasets.keys())}")
 
     path = datasets[dataset_name]["path"]
-    if os.path.basename(path) != "census.csv":
-        raise ValueError(
-            f"Expected census.csv for this experiment, but got path='{path}'. "
-            f"Use dataset_name='IPUMS-CPS' (or update datasets[...] mapping)."
-        )
-
     raw_df = pd.read_csv(path)
     data = _encode_and_clean(path, list(raw_df.columns))
 
-    required = ["INCTOT", "SEX", "RACE", "EDUC"]
-    missing = [c for c in required if c not in data.columns]
+    if dataset_name != "Adult":
+        raise ValueError("This version of experiment 9 is intended for dataset_name='Adult'.")
+
+    criteria = [
+        ["sex", "income>50K"],
+        ["race", "income>50K"],
+        ["sex", "income>50K", "education-num"],
+        ["race", "income>50K", "education-num"],
+    ]
+
+    required_cols = sorted(set(c for crit in criteria for c in crit))
+    missing = [c for c in required_cols if c not in data.columns]
     if missing:
         raise ValueError(f"Missing columns {missing}. Available columns: {list(data.columns)}")
 
@@ -2730,98 +2770,73 @@ def run_experiment_9(
     if n < 50:
         raise ValueError(f"Too few rows after cleaning (n={n}). Increase num_tuples.")
 
-    # =========================
-    # Part A: analysis queries (collect per-rep, then average)
-    # Output columns: query, EDUC, SEX, RACE, avg_inctot
-    # =========================
-    rows_q = []
+    # ---------------- collect query disparity summaries ----------------
+
+    print("################### Computing Queries ###################")
+
+    story_rows = []
 
     for rep in range(repetitions):
         sample = get_sample(
             df=data,
             n=n,
-            fairness_criteria=datasets[dataset_name]["criteria"],
+            fairness_criteria=criteria,
         ).copy()
 
-        sample["INCTOT"] = sample["INCTOT"].astype(float)
+        sample["income>50K"] = sample["income>50K"].astype(float)
 
-        def add_row(query: str, educ, sex, race, avg_val: float):
-            rows_q.append({
-                "query": query,
-                "EDUC": educ,
-                "SEX": sex,
-                "RACE": race,
-                "avg_inctot": float(avg_val),
+        for crit in criteria:
+            crit_label = _criterion_label(crit)
+            query_sql = _query_string(crit)
+
+            if len(crit) == 2:
+                s_col, y_col = crit
+                stats = _unconditional_story_stats(sample, s_col, y_col)
+            else:
+                s_col, y_col, a_col = crit
+                stats = _conditional_story_stats(sample, s_col, y_col, a_col)
+
+            story_rows.append({
+                "criterion": crit_label,
+                "query": query_sql,
+                **stats,
             })
 
-        # 1) overall
-        avg_all = _safe_mean(sample["INCTOT"].to_numpy())
-        add_row("avg INCTOT (overall)", "ALL", "ALL", "ALL", avg_all)
+        print(f"Finished repetition {rep + 1}/{repetitions}")
 
-        # 2) avg INCTOT | EDUC
-        for educ_val, grp in sample.groupby("EDUC"):
-            add_row("avg INCTOT | EDUC", educ_val, "", "", _safe_mean(grp["INCTOT"].to_numpy()))
-
-        # 3) avg INCTOT | SEX
-        for sex_val, grp in sample.groupby("SEX"):
-            add_row("avg INCTOT | SEX", "", sex_val, "", _safe_mean(grp["INCTOT"].to_numpy()))
-
-        # 4) avg INCTOT | RACE
-        for race_val, grp in sample.groupby("RACE"):
-            add_row("avg INCTOT | RACE", "", "", race_val, _safe_mean(grp["INCTOT"].to_numpy()))
-
-        # 5) avg INCTOT | (EDUC, SEX)
-        for (educ_val, sex_val), grp in sample.groupby(["EDUC", "SEX"]):
-            add_row("avg INCTOT | (EDUC, SEX)", educ_val, sex_val, "", _safe_mean(grp["INCTOT"].to_numpy()))
-
-        # 6) avg INCTOT | (EDUC, RACE)
-        for (educ_val, race_val), grp in sample.groupby(["EDUC", "RACE"]):
-            add_row("avg INCTOT | (EDUC, RACE)", educ_val, "", race_val, _safe_mean(grp["INCTOT"].to_numpy()))
-
-        print(f"rep={rep + 1}/{repetitions} | avg_all(INCTOT)={avg_all:.2f}")
-
-    df_queries_raw = pd.DataFrame(rows_q)
-
-    # Average across repetitions for identical groups (same query + EDUC/SEX/RACE)
-    df_queries = (
-        df_queries_raw
-        .groupby(["query", "EDUC", "SEX", "RACE"], as_index=False)
-        .agg(avg_inctot=("avg_inctot", "mean"))
-        .sort_values(["query", "EDUC", "SEX", "RACE"], kind="stable")
+    df_story = (
+        pd.DataFrame(story_rows)
+        .groupby(["criterion", "query"], as_index=False)
+        .agg(
+            min_group_rate=("min_group_rate", "mean"),
+            max_group_rate=("max_group_rate", "mean"),
+            query_disparity=("query_disparity", "mean"),
+        )
+        .sort_values("query_disparity", ascending=False, kind="stable")
         .reset_index(drop=True)
     )
 
-    # Print (shows the group columns explicitly)
-    print("\n=== Experiment 9: averaged query results (first 40 rows) ===")
-    with pd.option_context("display.max_rows", 200, "display.max_columns", 20, "display.width", 200):
-        print(df_queries.head(40))
+    # ---------------- compute unfairness measures ----------------
 
-    _write_csv_strict(df_queries, outfile_csv_queries)
-    print(f"Saved: {outfile_csv_queries}")
+    print("################### Computing Unfairness Measures ###################")
 
-    # =========================
-    # Part B: measure scores (averaged; table only)
-    # =========================
-    criteria = [
-        ["SEX", "INCTOT"],
-        ["RACE", "INCTOT"],
-        ["SEX", "INCTOT", "EDUC"],
-        ["RACE", "INCTOT", "EDUC"],
-    ]
+    measure_rows = []
 
-    rows_m = []
     for crit in criteria:
-        crit_label = f"{crit[0]}, {crit[1]}" if len(crit) == 2 else f"{crit[0]}, {crit[1]} | {crit[2]}"
+        crit_label = _criterion_label(crit)
 
-        mi_vals, tvd_vals, repair_vals, tc_vals = [], [], [], []
+        mi_vals = []
+        tvd_vals = []
+        repair_vals = []
+        tc_vals = []
+
         for _ in range(repetitions):
             sample = get_sample(
                 df=data,
                 n=n,
-                fairness_criteria=datasets[dataset_name]["criteria"],
+                fairness_criteria=criteria,
             ).copy()
 
-            # critical: densify before measures to avoid huge bincount allocations
             sub = _densify_columns(sample[crit].copy())
 
             mi_vals.append(float(MutualInformation(data=sub).calculate([crit], epsilon=epsilon)))
@@ -2829,7 +2844,7 @@ def run_experiment_9(
             repair_vals.append(float(ProxyRepairMaxSat(data=sub).calculate([crit], epsilon=epsilon)))
             tc_vals.append(float(TupleContribution(data=sub).calculate([crit], epsilon=epsilon)))
 
-        rows_m.append({
+        measure_rows.append({
             "criterion": crit_label,
             "MutualInformation": float(np.mean(mi_vals)),
             "ProxyMutualInformationTVD": float(np.mean(tvd_vals)),
@@ -2837,8 +2852,62 @@ def run_experiment_9(
             "TupleContribution": float(np.mean(tc_vals)),
         })
 
-    df_measures = pd.DataFrame(rows_m)
-    _write_csv_strict(df_measures, outfile_csv_measures)
+    df_measures = pd.DataFrame(measure_rows)
+
+    # ---------------- merge ----------------
+
+    df_summary = (
+        df_story.merge(df_measures, on="criterion", how="inner")
+        .sort_values("query_disparity", ascending=False, kind="stable")
+        .reset_index(drop=True)
+    )
+
+    # ---------------- kendall tau ----------------
+
+    kendall_rows = []
+    for col in [
+        "MutualInformation",
+        "ProxyMutualInformationTVD",
+        "ProxyRepairMaxSat",
+        "TupleContribution",
+    ]:
+        tau, pval = kendalltau(df_summary["query_disparity"], df_summary[col])
+        kendall_rows.append({
+            "measure": col,
+            "kendall_tau": float(tau),
+            "p_value": float(pval),
+        })
+
+    df_kendall = pd.DataFrame(kendall_rows)
+
+    # ---------------- save ----------------
+
+    _write_csv_strict(df_summary, outfile_csv_summary)
+    _write_csv_strict(df_kendall, outfile_csv_kendall)
+
+    # ---------------- print tables ----------------
+
+    print("\n" + "=" * 100)
+    print("QUERY DISPARITY VS MEASURES")
+    print("=" * 100)
+    with pd.option_context(
+        "display.max_rows", 50,
+        "display.max_columns", 20,
+        "display.width", 1000,
+        "display.max_colwidth", None,
+    ):
+        print(df_summary)
+
+    print("\n" + "=" * 100)
+    print("KENDALL TAU WITH QUERY DISPARITY")
+    print("=" * 100)
+    with pd.option_context(
+        "display.max_rows", 50,
+        "display.max_columns", 20,
+        "display.width", 1000,
+        "display.max_colwidth", None,
+    ):
+        print(df_kendall)
 
 
 def run_experiment_10(
@@ -3004,20 +3073,19 @@ def run_experiment_10(
 
 
 if __name__ == "__main__":
-    create_plot_0()
-    create_plot_1()
-    create_plot_2()
-    create_plot_3()
-    create_plot_4()
-    plot_legend()
-    run_experiment_1()
-    run_experiment_2()
-    run_experiment_3()
-    run_experiment_4()
-    run_experiment_5()
-    run_experiment_6()
-    run_experiment_7()
-    run_experiment_8()
+    # create_plot_0()
+    # create_plot_1()
+    # create_plot_2()
+    # create_plot_3()
+    # create_plot_4()
+    # plot_legend()
+    # run_experiment_1()
+    # run_experiment_2()
+    # run_experiment_3()
+    # run_experiment_4()
+    # run_experiment_5()
+    # run_experiment_6()
+    # run_experiment_7()
+    # run_experiment_8()
     run_experiment_9()
-    run_experiment_8()
-    run_experiment_10()
+    # run_experiment_10()
