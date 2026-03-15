@@ -2933,11 +2933,11 @@ def run_experiment_9_compas(
         criterion: [race, is_recid, age_cat]
 
       Query 2:
-        SELECT c_charge_degree, race, AVG(decile_score)
+        SELECT c_charge_degree, race, AVG(is_recid)
         FROM Compas
         GROUP BY c_charge_degree, race;
 
-        criterion: [race, decile_score, c_charge_degree]
+        criterion: [race, is_recid, c_charge_degree]
     """
 
     # ---------------- helpers ----------------
@@ -2998,7 +2998,7 @@ def run_experiment_9_compas(
 
     criteria = [
         ["race", "is_recid", "age_cat"],
-        ["race", "decile_score", "c_charge_degree"],
+        ["race", "is_recid", "c_charge_degree"],
     ]
 
     required_cols = sorted(set(c for crit in criteria for c in crit))
