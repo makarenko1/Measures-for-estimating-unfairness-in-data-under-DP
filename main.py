@@ -2912,7 +2912,7 @@ def run_experiment_9_adult(
 
 def run_experiment_9_compas(
     dataset_name: str = "Compas",
-    num_tuples: int = 10000,
+    num_tuples: int = 100000,
     repetitions: int = 10,
     epsilon: Optional[float] = 10.0,
     outfile_csv_summary: str = "plots/experiment9_compas_summary.csv",
