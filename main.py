@@ -1328,8 +1328,18 @@ def create_plot_4(
 
 
 ######################################### Experiments ##########################################
+# UNCOMMENT TO RUN LEGENDS:
+
 # plt.rcParams["mathtext.fontset"] = "cm"
 # plt.rcParams["font.family"] = "serif"
+
+# measures = {
+    # r"$\mathcal{U}_{MI}$": MutualInformation,
+    # r"Algorithm 1 ($\mathcal{U}_{MI}^{TVD}$)": ProxyMutualInformationTVD,
+    # "Algorithm 2 ($\mathcal{U}_{R}^{SAT}$)": ProxyRepairMaxSat,
+    # "Algorithm 2 ($\\mathcal{U}_{R}^{SAT}$)\nwith heuristic": ProxyRepairMaxSat,
+    # r"Algorithm 3 ($\mathcal{U}_{TC}$)": TupleContribution
+# }
 
 measures = {
     "Proxy Mutual Information TVD": ProxyMutualInformationTVD,
@@ -1390,16 +1400,23 @@ def _encode_and_clean(data_path, cols):
 
 
 def plot_legend(outfile="plots/legend.png"):
-    """Creating a standalone legend figure for Experiment 1 with the four measures arranged in a single horizontal row,
-    and save it to `outfile`.
-    """
-    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    """Standalone legend figure with custom colors and proper line break."""
+
+    # Explicit color mapping (MI = light red)
+    custom_colors = [
+        # "#ff6b6b",  # light red (MI)
+        "#1f77b4",  # blue
+        "#ff7f0e",  # orange
+        "#2ca02c",  # green
+    ]
+
     fig, ax = plt.subplots(figsize=(8, 1.6))
     handles = []
+
     for i, label in enumerate(measures.keys()):
         line = MplLine2D(
             [2, 3], [2, 2],
-            color=colors[i % len(colors)],
+            color=custom_colors[i % len(custom_colors)],
             marker="o",
             linestyle="-",
             linewidth=2,
@@ -1407,12 +1424,15 @@ def plot_legend(outfile="plots/legend.png"):
         )
         ax.add_line(line)
         handles.append(line)
+
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.set_xticks([])
     ax.set_yticks([])
+
     for spine in ax.spines.values():
         spine.set_visible(False)
+
     legend = ax.legend(
         handles,
         measures.keys(),
@@ -1423,6 +1443,7 @@ def plot_legend(outfile="plots/legend.png"):
         borderpad=0.15,
         handletextpad=0.5,
     )
+
     import matplotlib.patheffects as pe
     for text in legend.get_texts():
         text.set_path_effects([pe.withStroke(linewidth=0.2, foreground="black")])
@@ -2972,31 +2993,46 @@ def run_experiment_10(
 
     x = np.asarray(dp_stats["mean"], dtype=float)
 
-    # MI line + shadow
+    # MI line + shadow (LIGHT RED)
     mi_mean = np.asarray(mi_stats["mean"], dtype=float)
-    mi_min  = np.asarray(mi_stats["min"], dtype=float)
-    mi_max  = np.asarray(mi_stats["max"], dtype=float)
+    mi_min = np.asarray(mi_stats["min"], dtype=float)
+    mi_max = np.asarray(mi_stats["max"], dtype=float)
 
-    line_mi, = ax.plot(x, mi_mean, marker="o", linewidth=2, label="MutualInformation (no noise)")
+    line_mi, = ax.plot(
+        x, mi_mean,
+        marker="o",
+        linewidth=2,
+        color="#ff6b6b",  # light red
+        label="MutualInformation (no noise)"
+    )
     mask_mi = ~np.isnan(x) & ~np.isnan(mi_min) & ~np.isnan(mi_max)
     if mask_mi.any():
         ax.fill_between(
             x[mask_mi], mi_min[mask_mi], mi_max[mask_mi],
-            alpha=0.2, color=line_mi.get_color(), linewidth=0
+            alpha=0.2,
+            color="#ff6b6b",
+            linewidth=0
         )
 
-    # TVD proxy line + shadow
+    # TVD proxy line + shadow (BLUE)
     tvd_mean = np.asarray(tvd_stats["mean"], dtype=float)
-    tvd_min  = np.asarray(tvd_stats["min"], dtype=float)
-    tvd_max  = np.asarray(tvd_stats["max"], dtype=float)
+    tvd_min = np.asarray(tvd_stats["min"], dtype=float)
+    tvd_max = np.asarray(tvd_stats["max"], dtype=float)
 
-    line_tvd, = ax.plot(x, tvd_mean, marker="o", linewidth=2,
-                        label="ProxyMutualInformationTVD (no noise)")
+    line_tvd, = ax.plot(
+        x, tvd_mean,
+        marker="o",
+        linewidth=2,
+        color="#1f77b4",  # blue
+        label="ProxyMutualInformationTVD (no noise)"
+    )
     mask_tvd = ~np.isnan(x) & ~np.isnan(tvd_min) & ~np.isnan(tvd_max)
     if mask_tvd.any():
         ax.fill_between(
             x[mask_tvd], tvd_min[mask_tvd], tvd_max[mask_tvd],
-            alpha=0.2, color=line_tvd.get_color(), linewidth=0
+            alpha=0.2,
+            color="#1f77b4",
+            linewidth=0
         )
 
     ax.set_xlabel("Demographic Parity gap")
@@ -3011,19 +3047,19 @@ def run_experiment_10(
 
 
 if __name__ == "__main__":
-    create_plot_0()
-    create_plot_1()
-    create_plot_2()
-    create_plot_3()
-    create_plot_4()
+    # create_plot_0()
+    # create_plot_1()
+    # create_plot_2()
+    # create_plot_3()
+    # create_plot_4()
     plot_legend()
-    run_experiment_1()
-    run_experiment_2()
-    run_experiment_3()
-    run_experiment_4()
-    run_experiment_5()
-    run_experiment_6()
-    run_experiment_7()
-    run_experiment_8()
-    run_experiment_9()
-    run_experiment_10()
+    # run_experiment_1()
+    # run_experiment_2()
+    # run_experiment_3()
+    # run_experiment_4()
+    # run_experiment_5()
+    # run_experiment_6()
+    # run_experiment_7()
+    # run_experiment_8()
+    # run_experiment_9()
+    # run_experiment_10()
