@@ -95,21 +95,12 @@ def get_sample(
     mode: Literal["raise", "cap", "fallback"] = "cap",
 ) -> pd.DataFrame:
     """
-    Sampling with min-count>=2 constraint.
+    Sample rows while enforcing a minimum group size of 2 for admissible values.
 
-    Primary rule (strong): build a *combined key* from all admissible columns and ensure
-    no combined-key bucket appears with size 1 in the sample (activate buckets via pairs).
-
-    If infeasible:
-      - mode="raise": raise ValueError
-      - mode="cap": set n = eligible_total (max feasible) and proceed
-      - mode="fallback": fall back to per-column constraint (each admissible column value
-        appearing in the sample must appear >=2), which can allow larger n.
-
-    Notes:
-      - With combined-key fairness, max feasible is:
-            eligible_total = sum(bucket_size for buckets with size>=2)
-      - Singleton combined-key buckets are never selectable under the strong rule.
+    The primary rule builds a combined key from all admissible columns and ensures
+    that no combined-key bucket appears exactly once in the sample. If this is
+    infeasible, the function either raises an error, caps the sample size, or
+    falls back to a weaker per-column constraint, depending on `mode`.
     """
     if n < 0:
         raise ValueError("Sampling error: n must be nonnegative")
@@ -274,15 +265,11 @@ def _get_sample_per_column_min(
     rng: np.random.Generator
 ) -> pd.DataFrame:
     """
-    Fallback sampler: ensures for EACH admissible column independently,
-    any value that appears in the sample appears at least twice.
+    Fallback sampler that enforces a minimum group size of 2 independently for
+    each admissible column.
 
-    This is weaker than combined-key fairness, but often matches "fairness per attribute".
-    Greedy constructive algorithm:
-      - maintain a pool of eligible rows; when we pick a row, we also pick a "buddy" row
-        that matches it on all admissible cols where possible.
-      - if exact buddy on all cols not available, we enforce per-column min2 by tracking counts
-        and preferentially picking rows that avoid creating singletons.
+    This is weaker than the combined-key constraint used by `get_sample`, but it
+    can allow larger feasible samples when the strong rule is not satisfiable.
     """
     if n > len(df):
         raise ValueError("Sampling error: n larger than df (no replacement)")
@@ -387,8 +374,10 @@ def create_plot_0(
         repetitions: int = 10,
         outfile: str = "plots/plot0.png",
 ):
-    """Values of measures for IPUMS-CPS (for criterions with more unfairness we expect higher values)."""
-
+    """
+    Plot average unfairness-measure values and model-based fairness gaps for the
+    Adult fairness criteria.
+    """
     def demographic_parity_with_rf(
             df: pd.DataFrame,
             protected_col: str,
@@ -396,8 +385,10 @@ def create_plot_0(
             admissible_col: Optional[str] = None
     ) -> Tuple[float, float]:
         """
-        Demographic parity (or conditional statistical parity for conditional criteria) with a RandomForest
-        classifier. Returns (dp_gap, rf_loss), where rf_loss is 1 - accuracy on test.
+        Compute demographic parity or conditional statistical parity with a
+        differentially private Random Forest classifier.
+
+        Returns the fairness gap together with the test loss (1 - accuracy).
         """
         if df.empty:
             return 0.0, 0.0
@@ -479,10 +470,10 @@ def create_plot_0(
             admissible_col: Optional[str] = None
     ) -> Tuple[float, float]:
         """
-        Demographic parity (or conditional statistical parity for conditional criteria) with a small neural net trained
-        with DP-SGD (via Opacus PrivacyEngine).
+        Compute demographic parity or conditional statistical parity with a
+        differentially private neural network trained using DP-SGD.
 
-        Returns (dp_gap, nn_loss), where nn_loss is 1 - accuracy on test.
+        Returns the fairness gap together with the test loss (1 - accuracy).
         """
         if df.empty:
             return 0.0, 0.0
@@ -1339,16 +1330,12 @@ timeout_seconds = 24 * 60 * 60
 
 def _encode_and_clean(data_path, cols):
     """
-    Read CSV, clean missing values, normalize numeric columns, and label-encode
-    categorical columns in `cols`.
+    Load a dataset, apply dataset-specific preprocessing, and encode the selected
+    columns.
 
-    - Replace ["NA", "N/A", ""] with NaN and drop rows with missing values in `cols`.
-    - For numeric columns in `cols`, replace negative values with 0.
-    - For data/census.csv:
-        * Bin AGE into buckets of size 10 (e.g., 1–10 -> 10, 11–20 -> 20, ...).
-        * Drop rows with INCTOT > 200000.
-        * Discretize INCTOT into 10,000-wide buckets (0–9999 -> 0, 10000–19999 -> 10000, ...).
-    - For categorical columns in `cols`, apply LabelEncoder.
+    Numeric columns are cleaned by replacing negative values with 0. Categorical
+    columns are label-encoded after missing values are converted into an explicit
+    category. Additional preprocessing is applied for the IPUMS-CPS dataset.
     """
     df = pd.read_csv(data_path)
     df = df.replace(["NA", "N/A", ""], pd.NA).copy()
@@ -1388,8 +1375,8 @@ def _encode_and_clean(data_path, cols):
 
 
 def plot_legend(outfile="plots/legend_proxies.png"):
-    """Creating a standalone legend figure for Experiment 1 with the four measures arranged in a single horizontal row,
-    and save it to `outfile`.
+    """
+    Create and save a standalone legend figure for the unfairness measures.
     """
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     fig, ax = plt.subplots(figsize=(8, 1.6))
@@ -1430,8 +1417,9 @@ def run_experiment_1(
     repetitions=10,
     outfile="plots/experiment1.png"
 ):
-    """Plotting average runtimes over 'repetitions' repetitions per measure and dataset as function of
-    the number of tuples."""
+    """
+    Plot runtime as a function of the number of tuples for all measures and datasets.
+    """
 
     num_tupless_per_dataset = {
         "Adult": [1000, 5000, 10000, 15000, 30000],
@@ -1564,8 +1552,10 @@ def run_experiment_2(
     repetitions=10,
     outfile="plots/experiment2.png"
 ):
-    """Plot average runtimes over `repetitions` per measure and dataset as function of the number of criteria."""
-
+    """
+    Plot runtime as a function of the number of fairness criteria for all measures
+    and datasets.
+    """
     plt.rcParams.update({
         "axes.titlesize": 34,
         "axes.labelsize": 30,
@@ -1677,8 +1667,10 @@ def run_experiment_3(
     repetitions=10,
     outfile="plots/experiment3.png"
 ):
-    """Relative L1 error as function of epsilon."""
-
+    """
+    Plot relative L1 error as a function of the privacy budget for all measures
+    and datasets.
+    """
     def _rel_error(x, y, tiny = 1e-100):
         denom = max(abs(y), tiny)  # ensure we do not divide by 0
         return abs(x - y) / denom
@@ -1803,11 +1795,9 @@ def run_experiment_4(
         outfile: str = "plots/experiment4.png",
 ):
     """
-    For each dataset: histogram with X = fairness criteria (indexed 1..k), Y = value.
-    For each criterion, show two bars: MutualInformation and its proxy
-    ProxyMutualInformationTVD, averaged over `repetitions`.
+    Compare MutualInformation and ProxyMutualInformationTVD across fairness criteria
+    for all datasets.
     """
-
     plt.rcParams.update({
         "axes.titlesize": 34,
         "axes.labelsize": 30,
@@ -1930,8 +1920,9 @@ def run_experiment_5(
     epsilon=None,
     outfile="plots/experiment5.png",
 ):
-    """TupleContribution value as function of k, sampling separately for each repetition."""
-
+    """
+    Plot TupleContribution as a function of k for all datasets.
+    """
     ks_per_dataset = {
         "Adult": [10, 50, 100, 250, 500, 1000, 5000, 10000, 15000, 30000],
         "IPUMS-CPS": [10, 50, 100, 250, 500, 1000, 5000, 10000, 50000, 100000, 300000, 600000, 1000000],
@@ -2044,8 +2035,9 @@ def run_experiment_6(
     epsilon=1.0,
     outfile="plots/experiment6.png",
 ):
-    """Relative L1 error of TupleContribution as function of k."""
-
+    """
+    Plot the relative L1 error of TupleContribution as a function of k for all datasets.
+    """
     ks_per_dataset = {
         "Adult": [10, 50, 100, 250, 500, 1000, 5000, 10000, 15000, 30000],
         "IPUMS-CPS": [10, 50, 100, 250, 500, 1000, 5000, 10000, 50000, 100000, 300000, 600000, 1000000],
@@ -2185,15 +2177,9 @@ def run_experiment_7(
     outfile: str = "plots/experiment7.png",
 ):
     """
-    Plot measure values vs growing unfairness on a synthetic dataset with two columns:
-      sex in {0,1} and income>50K in {0,1}.
-    Start fair: for each sex, 50% income=0 and 50% income=1.
-    Then, at each step t = 0, step, 2*step, ..., 1.0:
-      - flip a fraction t of (male, income=0) to income=1
-      - flip a fraction t of (female, income=1) to income=0
-    So at t=1.0: all males income=1, all females income=0.
+    Plot unfairness-measure values against the demographic parity gap on a synthetic
+    dataset with gradually increasing unfairness.
     """
-
     # ---- helpers -------------------------------------------------
     def _make_dataset(t: float) -> pd.DataFrame:
         """
@@ -2303,8 +2289,8 @@ def run_experiment_7(
 
     # ---- plot ----------------------------------------------------
     plt.rcParams.update({
-        "axes.titlesize": 18,
-        "axes.labelsize": 18,
+        "axes.titlesize": 20,
+        "axes.labelsize": 30,
         "xtick.labelsize": 18,
         "ytick.labelsize": 18,
     })
@@ -2335,7 +2321,7 @@ def run_experiment_7(
 
     ax.set_xlabel("Demographic Parity gap")
     ax.set_yscale('symlog')
-    ax.set_ylabel("measure value, symlog")
+    ax.set_ylabel("measure value,\nsymlog")
     ax.grid(True, linestyle="--", alpha=0.4)
     ax.yaxis.set_major_formatter(y_formatter)
 
@@ -2352,28 +2338,13 @@ def run_experiment_8(
     repetitions: int = 10,
     complexity_grid=(1, 2, 3, 4, 5),          # layers for NN, trees for RF
     nn_epochs: int = 20,                      # fixed training epochs for NN (complexity is layers)
-    epsilon: Optional[float] = 10.0,
+    epsilon: Optional[float] = 1.0,
     outfile: str = "plots/experiment8.png",
 ):
     """
-    Creates THREE plots (with min..max shadow bands over repetitions):
-
-      1) Accuracy vs complexity
-      2) Training time (seconds) vs complexity
-      3) Demographic Parity gap vs complexity
-
-    X-axis: complexity (NN = number of hidden layers, RF = number of trees)
-
-    Both models are trained privately if epsilon is not None:
-      - RF: diffprivlib RandomForestClassifier(epsilon=epsilon)
-      - NN: DP-SGD via Opacus PrivacyEngine(target_epsilon=epsilon)
-
-    Saves 3 files:
-      - <outfile base>_acc.png
-      - <outfile base>_time.png
-      - <outfile base>_dp.png
+    Plot model accuracy, training time, and demographic parity gap as functions of
+    model complexity for privately trained Random Forest and neural network models.
     """
-
     # ---- locate dataset ----
     if dataset_name not in datasets:
         raise ValueError(f"Unknown dataset_name='{dataset_name}'. Choose from {list(datasets.keys())}")
@@ -2638,367 +2609,1324 @@ def run_experiment_8(
     )
 
 
-def run_experiment_9_adult(
-    dataset_name: str = "Adult",
+def run_experiment_9(
     num_tuples: int = 100000,
     repetitions: int = 10,
-    epsilon: Optional[float] = 10.0,
-    outfile_csv_summary: str = "plots/experiment9_adult_summary.csv",
-    outfile_csv_kendall: str = "plots/experiment9_adult_kendall.csv",
+    epsilon: Optional[float] = 1.0,
+    outfile_csv_summary_adult: str = "plots/experiment9_adult_summary.csv",
+    outfile_csv_summary_compas: str = "plots/experiment9_compas_summary.csv",
 ):
     """
-    Experiment 9 (Adult):
-    Show that when query answers reveal stronger disparities in the probability of
-    high income across groups, the unfairness measures also become larger.
-
-    Prints only:
-      1) QUERY DISPARITY VS MEASURES
-      2) KENDALL TAU WITH QUERY DISPARITY
-
-    Saves:
-      - outfile_csv_summary
-      - outfile_csv_kendall
+    Run Experiment 9 on the Adult and Compas datasets.
     """
-
-    # ---------------- helpers ----------------
-
-    def _write_csv_strict(df: pd.DataFrame, path: str) -> None:
-        dir_name = os.path.dirname(path)
-        if dir_name:
-            os.makedirs(dir_name, exist_ok=True)
-        try:
-            df.to_csv(path, index=False)
-        except PermissionError as e:
-            raise PermissionError(
-                f"Permission denied writing '{path}'. "
-                f"Close the file in Excel/other programs, or choose a different output path."
-            ) from e
-
-    def _densify_columns(df: pd.DataFrame) -> pd.DataFrame:
-        out = df.copy()
-        for c in out.columns:
-            codes, _ = pd.factorize(out[c], sort=False)
-            out[c] = codes.astype(np.int64)
-        return out
-
-    def _criterion_label(crit):
-        if len(crit) == 2:
-            return f"{crit[0]}, {crit[1]}"
-        return f"{crit[0]}, {crit[1]} | {crit[2]}"
-
-    def _query_string(crit):
-        if len(crit) == 2:
-            s, y = crit
-            return f"SELECT {s}, AVG({y}) AS rate_{y} FROM {dataset_name} GROUP BY {s};"
-        s, y, a = crit
-        return f"SELECT {a}, {s}, AVG({y}) AS rate_{y} FROM {dataset_name} GROUP BY {a}, {s};"
-
-    def _unconditional_story_stats(sample: pd.DataFrame, s_col: str, y_col: str):
+    def _run_experiment_9_helper(
+            dataset_name: str,
+            criteria: list[list[str]],
+            num_tuples: int,
+            repetitions: int,
+            epsilon: Optional[float],
+            outfile_csv_summary: str,
+    ):
         """
-        disparity = sum_s Pr(S=s) * |Pr(Y=1|S=s) - Pr(Y=1)|
+        Compute query disparity and unfairness-measure summaries for one dataset,
+        save the results to CSV, and print the summary table.
         """
-        overall_rate = float(sample[y_col].mean())
-        grouped = sample.groupby(s_col)[y_col]
-        means = grouped.mean()
-        counts = grouped.size()
-        weights = counts / counts.sum()
+        # ---------------- helpers ----------------
 
-        disparity = float((weights * (means - overall_rate).abs()).sum())
+        def _write_csv_strict(df: pd.DataFrame, path: str) -> None:
+            dir_name = os.path.dirname(path)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+            try:
+                df.to_csv(path, index=False)
+            except PermissionError as e:
+                raise PermissionError(
+                    f"Permission denied writing '{path}'. "
+                    f"Close the file in Excel/other programs, or choose a different output path."
+                ) from e
 
-        return {
-            "min_group_rate": float(means.min()) if len(means) else np.nan,
-            "max_group_rate": float(means.max()) if len(means) else np.nan,
-            "query_disparity": disparity,
-        }
+        def _densify_columns(df: pd.DataFrame) -> pd.DataFrame:
+            out = df.copy()
+            for c in out.columns:
+                codes, _ = pd.factorize(out[c], sort=False)
+                out[c] = codes.astype(np.int64)
+            return out
 
-    def _conditional_story_stats(sample: pd.DataFrame, s_col: str, y_col: str, a_col: str):
-        """
-        disparity =
-          sum_a Pr(A=a) * sum_s Pr(S=s|A=a) * |Pr(Y=1|S=s,A=a) - Pr(Y=1|A=a)|
-        """
-        total = len(sample)
-        disparity = 0.0
-        subgroup_rates = []
+        def _criterion_label(crit):
+            if len(crit) == 2:
+                return f"{crit[0]}, {crit[1]}"
+            return f"{crit[0]}, {crit[1]} | {crit[2]}"
 
-        for _, grp_a in sample.groupby(a_col):
-            if len(grp_a) == 0:
-                continue
+        def _query_string(crit):
+            if len(crit) == 2:
+                s, y = crit
+                return f"SELECT {s}, AVG({y}) AS rate_{y} FROM {dataset_name} GROUP BY {s};"
 
-            mean_a = float(grp_a[y_col].mean())
-            grouped = grp_a.groupby(s_col)[y_col]
+            s, y, a = crit
+            return (
+                f"SELECT {a}, MAX(avg_y) - MIN(avg_y) AS disparity "
+                f"FROM ("
+                f"SELECT {a}, {s}, AVG({y}) AS avg_y "
+                f"FROM {dataset_name} "
+                f"GROUP BY {a}, {s}"
+                f") q "
+                f"GROUP BY {a};"
+            )
+
+        def _unconditional_story_stats(sample: pd.DataFrame, s_col: str, y_col: str):
+            overall_rate = float(sample[y_col].mean())
+            grouped = sample.groupby(s_col)[y_col]
             means = grouped.mean()
             counts = grouped.size()
             weights = counts / counts.sum()
 
-            subgroup_rates.extend(means.tolist())
+            disparity = float((weights * (means - overall_rate).abs()).sum())
 
-            weight_a = len(grp_a) / total
-            disparity_a = float((weights * (means - mean_a).abs()).sum())
-            disparity += weight_a * disparity_a
+            return {
+                "min_group_rate": float(means.min()) if len(means) else np.nan,
+                "max_group_rate": float(means.max()) if len(means) else np.nan,
+                "query_disparity": disparity,
+            }
 
-        return {
-            "min_group_rate": float(np.min(subgroup_rates)) if subgroup_rates else np.nan,
-            "max_group_rate": float(np.max(subgroup_rates)) if subgroup_rates else np.nan,
-            "query_disparity": float(disparity),
-        }
+        def _conditional_story_stats(sample: pd.DataFrame, s_col: str, y_col: str, a_col: str):
+            total = len(sample)
+            disparity = 0.0
+            subgroup_rates = []
 
-    # ---------------- load data ----------------
+            for _, grp_a in sample.groupby(a_col):
+                if len(grp_a) == 0:
+                    continue
 
-    if dataset_name not in datasets:
-        raise ValueError(f"Unknown dataset_name='{dataset_name}'. Choose from {list(datasets.keys())}")
+                mean_a = float(grp_a[y_col].mean())
+                grouped = grp_a.groupby(s_col)[y_col]
+                means = grouped.mean()
+                counts = grouped.size()
+                weights = counts / counts.sum()
 
-    path = datasets[dataset_name]["path"]
-    raw_df = pd.read_csv(path)
-    data = _encode_and_clean(path, list(raw_df.columns))
+                subgroup_rates.extend(means.tolist())
 
-    if dataset_name != "Adult":
-        raise ValueError("This version of experiment 9 is intended for dataset_name='Adult'.")
+                weight_a = len(grp_a) / total
+                disparity_a = float((weights * (means - mean_a).abs()).sum())
+                disparity += weight_a * disparity_a
 
-    criteria = [
-        ["sex", "income>50K"],
-        ["race", "income>50K"],
-        ["sex", "income>50K", "education-num"],
-        ["race", "income>50K", "education-num"],
-    ]
+            return {
+                "min_group_rate": float(np.min(subgroup_rates)) if subgroup_rates else np.nan,
+                "max_group_rate": float(np.max(subgroup_rates)) if subgroup_rates else np.nan,
+                "query_disparity": float(disparity),
+            }
 
-    required_cols = sorted(set(c for crit in criteria for c in crit))
-    missing = [c for c in required_cols if c not in data.columns]
-    if missing:
-        raise ValueError(f"Missing columns {missing}. Available columns: {list(data.columns)}")
+        # ---------------- load data ----------------
 
-    n = min(num_tuples, len(data))
-    if n < 50:
-        raise ValueError(f"Too few rows after cleaning (n={n}). Increase num_tuples.")
+        if dataset_name not in datasets:
+            raise ValueError(f"Unknown dataset_name='{dataset_name}'. Choose from {list(datasets.keys())}")
 
-    # ---------------- collect query disparity summaries ----------------
+        path = datasets[dataset_name]["path"]
+        raw_df = pd.read_csv(path)
+        data = _encode_and_clean(path, list(raw_df.columns))
 
-    print("################### Computing Queries ###################")
+        required_cols = sorted(set(c for crit in criteria for c in crit))
+        missing = [c for c in required_cols if c not in data.columns]
+        if missing:
+            raise ValueError(f"Missing columns {missing}. Available columns: {list(data.columns)}")
 
-    story_rows = []
+        n = min(num_tuples, len(data))
+        if n < 50:
+            raise ValueError(f"Too few rows after cleaning (n={n}). Increase num_tuples.")
 
-    for rep in range(repetitions):
-        sample = get_sample(
-            df=data,
-            n=n,
-            fairness_criteria=criteria,
-        ).copy()
+        # ---------------- collect query disparity summaries ----------------
 
-        sample["income>50K"] = sample["income>50K"].astype(float)
+        print(f"################### Computing Queries for {dataset_name} ###################")
 
-        for crit in criteria:
-            crit_label = _criterion_label(crit)
-            query_sql = _query_string(crit)
+        story_rows = []
 
-            if len(crit) == 2:
-                s_col, y_col = crit
-                stats = _unconditional_story_stats(sample, s_col, y_col)
-            else:
-                s_col, y_col, a_col = crit
-                stats = _conditional_story_stats(sample, s_col, y_col, a_col)
-
-            story_rows.append({
-                "criterion": crit_label,
-                "query": query_sql,
-                **stats,
-            })
-
-        print(f"Finished repetition {rep + 1}/{repetitions}")
-
-    df_story = (
-        pd.DataFrame(story_rows)
-        .groupby(["criterion", "query"], as_index=False)
-        .agg(
-            min_group_rate=("min_group_rate", "mean"),
-            max_group_rate=("max_group_rate", "mean"),
-            query_disparity=("query_disparity", "mean"),
-        )
-        .sort_values("query_disparity", ascending=False, kind="stable")
-        .reset_index(drop=True)
-    )
-
-    # ---------------- compute unfairness measures ----------------
-
-    print("################### Computing Unfairness Measures ###################")
-
-    measure_rows = []
-
-    for crit in criteria:
-        crit_label = _criterion_label(crit)
-
-        mi_vals = []
-        tvd_vals = []
-        repair_vals = []
-        tc_vals = []
-
-        for _ in range(repetitions):
+        for rep in range(repetitions):
             sample = get_sample(
                 df=data,
                 n=n,
                 fairness_criteria=criteria,
             ).copy()
 
-            sub = _densify_columns(sample[crit].copy())
+            for crit in criteria:
+                y_col = crit[1]
+                sample[y_col] = pd.to_numeric(sample[y_col], errors="coerce").astype(float)
 
-            mi_vals.append(float(MutualInformation(data=sub).calculate([crit], epsilon=epsilon)))
-            tvd_vals.append(float(ProxyMutualInformationTVD(data=sub).calculate([crit], epsilon=epsilon)))
-            repair_vals.append(float(ProxyRepairMaxSat(data=sub).calculate([crit], epsilon=epsilon)))
-            tc_vals.append(float(TupleContribution(data=sub).calculate([crit], epsilon=epsilon)))
+            for crit in criteria:
+                crit_label = _criterion_label(crit)
+                query_sql = _query_string(crit)
 
-        measure_rows.append({
-            "criterion": crit_label,
-            "MutualInformation": float(np.mean(mi_vals)),
-            "ProxyMutualInformationTVD": float(np.mean(tvd_vals)),
-            "ProxyRepairMaxSat": float(np.mean(repair_vals)),
-            "TupleContribution": float(np.mean(tc_vals)),
-        })
+                if len(crit) == 2:
+                    s_col, y_col = crit
+                    stats = _unconditional_story_stats(sample, s_col, y_col)
+                else:
+                    s_col, y_col, a_col = crit
+                    stats = _conditional_story_stats(sample, s_col, y_col, a_col)
 
-    df_measures = pd.DataFrame(measure_rows)
+                story_rows.append({
+                    "criterion": crit_label,
+                    "query": query_sql,
+                    **stats,
+                })
 
-    # ---------------- merge ----------------
+            print(f"{dataset_name}: finished query repetition {rep + 1}/{repetitions}")
 
-    df_summary = (
-        df_story.merge(df_measures, on="criterion", how="inner")
-        .sort_values("query_disparity", ascending=False, kind="stable")
-        .reset_index(drop=True)
+        df_story = (
+            pd.DataFrame(story_rows)
+            .groupby(["criterion", "query"], as_index=False)
+            .agg(
+                min_group_rate=("min_group_rate", "mean"),
+                max_group_rate=("max_group_rate", "mean"),
+                query_disparity=("query_disparity", "mean"),
+            )
+            .sort_values("query_disparity", ascending=False, kind="stable")
+            .reset_index(drop=True)
+        )
+
+        # ---------------- compute unfairness measures ----------------
+
+        print(f"################### Computing Unfairness Measures for {dataset_name} ###################")
+
+        measure_rows = []
+
+        for crit in criteria:
+            crit_label = _criterion_label(crit)
+
+            mi_vals = []
+            tvd_vals = []
+            repair_vals = []
+            tc_vals = []
+
+            for rep in range(repetitions):
+                sample = get_sample(
+                    df=data,
+                    n=n,
+                    fairness_criteria=criteria,
+                ).copy()
+
+                sub = _densify_columns(sample[crit].copy())
+
+                mi_vals.append(float(MutualInformation(data=sub).calculate([crit], epsilon=epsilon)))
+                tvd_vals.append(float(ProxyMutualInformationTVD(data=sub).calculate([crit], epsilon=epsilon)))
+                repair_vals.append(float(ProxyRepairMaxSat(data=sub).calculate([crit], epsilon=epsilon)))
+                tc_vals.append(float(TupleContribution(data=sub).calculate([crit], epsilon=epsilon)))
+
+                print(f"{dataset_name}: finished measure repetition {rep + 1}/{repetitions} for {crit_label}")
+
+            measure_rows.append({
+                "criterion": crit_label,
+                "MutualInformation": float(np.mean(mi_vals)),
+                "ProxyMutualInformationTVD": float(np.mean(tvd_vals)),
+                "ProxyRepairMaxSat": float(np.mean(repair_vals)),
+                "TupleContribution": float(np.mean(tc_vals)),
+            })
+
+        df_measures = pd.DataFrame(measure_rows)
+
+        # ---------------- merge ----------------
+
+        df_summary = (
+            df_story.merge(df_measures, on="criterion", how="inner")
+            .sort_values("query_disparity", ascending=False, kind="stable")
+            .reset_index(drop=True)
+        )
+
+        # ---------------- save ----------------
+
+        _write_csv_strict(df_summary, outfile_csv_summary)
+
+        # ---------------- print ----------------
+
+        print("\n" + "=" * 100)
+        print(f"QUERY DISPARITY VS MEASURES: {dataset_name}")
+        print("=" * 100)
+        with pd.option_context(
+                "display.max_rows", 50,
+                "display.max_columns", 20,
+                "display.width", 1000,
+                "display.max_colwidth", None,
+        ):
+            print(df_summary)
+
+    def run_experiment_9_adult(
+            num_tuples: int = 100000,
+            repetitions: int = 10,
+            epsilon: Optional[float] = 10.0,
+            outfile_csv_summary: str = "plots/experiment9_adult_summary.csv",
+    ):
+        """
+        Run Experiment 9 on the Adult dataset.
+        """
+        criteria = [
+            ["sex", "income>50K"],
+            ["race", "income>50K"],
+        ]
+
+        _run_experiment_9_helper(
+            dataset_name="Adult",
+            criteria=criteria,
+            num_tuples=num_tuples,
+            repetitions=repetitions,
+            epsilon=epsilon,
+            outfile_csv_summary=outfile_csv_summary,
+        )
+
+    def run_experiment_9_compas(
+            num_tuples: int = 100000,
+            repetitions: int = 10,
+            epsilon: Optional[float] = 10.0,
+            outfile_csv_summary: str = "plots/experiment9_compas_summary.csv",
+    ):
+        """
+        Run Experiment 9 on the Compas dataset.
+        """
+        criteria = [
+            ["race", "decile_score", "age_cat"],
+            ["race", "decile_score", "c_charge_degree"],
+            ["c_charge_degree", "decile_score", "race"],
+            ["age_cat", "decile_score", "race"],
+        ]
+
+        _run_experiment_9_helper(
+            dataset_name="Compas",
+            criteria=criteria,
+            num_tuples=num_tuples,
+            repetitions=repetitions,
+            epsilon=epsilon,
+            outfile_csv_summary=outfile_csv_summary,
+        )
+
+    print("\n" + "#" * 120)
+    print("RUNNING EXPERIMENT 9: ADULT")
+    print("#" * 120)
+    run_experiment_9_adult(
+        num_tuples=num_tuples,
+        repetitions=repetitions,
+        epsilon=epsilon,
+        outfile_csv_summary=outfile_csv_summary_adult,
     )
 
-    # ---------------- kendall tau ----------------
-
-    kendall_rows = []
-    for col in [
-        "MutualInformation",
-        "ProxyMutualInformationTVD",
-        "ProxyRepairMaxSat",
-        "TupleContribution",
-    ]:
-        tau, pval = kendalltau(df_summary["query_disparity"], df_summary[col])
-        kendall_rows.append({
-            "measure": col,
-            "kendall_tau": float(tau),
-            "p_value": float(pval),
-        })
-
-    df_kendall = pd.DataFrame(kendall_rows)
-
-    # ---------------- save ----------------
-
-    _write_csv_strict(df_summary, outfile_csv_summary)
-    _write_csv_strict(df_kendall, outfile_csv_kendall)
-
-    # ---------------- print tables ----------------
-
-    print("\n" + "=" * 100)
-    print("QUERY DISPARITY VS MEASURES")
-    print("=" * 100)
-    with pd.option_context(
-        "display.max_rows", 50,
-        "display.max_columns", 20,
-        "display.width", 1000,
-        "display.max_colwidth", None,
-    ):
-        print(df_summary)
-
-    print("\n" + "=" * 100)
-    print("KENDALL TAU WITH QUERY DISPARITY")
-    print("=" * 100)
-    with pd.option_context(
-        "display.max_rows", 50,
-        "display.max_columns", 20,
-        "display.width", 1000,
-        "display.max_colwidth", None,
-    ):
-        print(df_kendall)
+    print("\n" + "#" * 120)
+    print("RUNNING EXPERIMENT 9: COMPAS")
+    print("#" * 120)
+    run_experiment_9_compas(
+        num_tuples=num_tuples,
+        repetitions=repetitions,
+        epsilon=epsilon,
+        outfile_csv_summary=outfile_csv_summary_compas,
+    )
 
 
-def run_experiment_9_compas(
-    dataset_name: str = "Compas",
-    num_tuples: int = 100000,
-    repetitions: int = 10,
-    epsilon: Optional[float] = 10.0,
-    outfile_csv_summary: str = "plots/experiment9_compas_summary.csv",
-    outfile_csv_kendall: str = "plots/experiment9_compas_kendall.csv",
+# def run_experiment_10(
+#     step: float = 0.1,
+#     n_per_sex: int = 100000,
+#     repetitions: int = 10,
+#     outfile: str = "plots/experiment10.png",
+# ):
+#     """
+#     Plot model accuracy, training time, demographic parity gap, and conditional
+#     statistical parity gap as functions of model complexity on the Adult dataset.
+#     """
+#
+#     # --- helpers -------------------------------------------------
+#     def _make_dataset(t: float) -> pd.DataFrame:
+#         """
+#         Create synthetic dataset for a given unfairness level t in [0,1].
+#         sex: 1=male, 0=female
+#         income: 1=income>50K, 0=otherwise
+#         """
+#         n = int(n_per_sex)
+#
+#         # Base fair allocation:
+#         m0 = n // 2
+#         m1 = n - m0
+#         f0 = n // 2
+#         f1 = n - f0
+#
+#         flip_m = int(round(t * m0))  # male: 0 -> 1
+#         flip_f = int(round(t * f1))  # female: 1 -> 0
+#
+#         m0_new = m0 - flip_m
+#         m1_new = m1 + flip_m
+#         f1_new = f1 - flip_f
+#         f0_new = f0 + flip_f
+#
+#         sex = np.concatenate([
+#             np.ones(m0_new + m1_new, dtype=int),   # males = 1
+#             np.zeros(f0_new + f1_new, dtype=int),  # females = 0
+#         ])
+#         income = np.concatenate([
+#             np.concatenate([np.zeros(m0_new, dtype=int), np.ones(m1_new, dtype=int)]),
+#             np.concatenate([np.zeros(f0_new, dtype=int), np.ones(f1_new, dtype=int)]),
+#         ])
+#
+#         df = pd.DataFrame({"sex": sex, "income>50K": income})
+#         df = df.sample(frac=1.0, replace=False).reset_index(drop=True)
+#         return df
+#
+#     def _dp_gap(df: pd.DataFrame) -> float:
+#         rates = df.groupby("sex")["income>50K"].mean()
+#         return float(abs(rates.max() - rates.min())) if len(rates) else 0.0
+#
+#     # --- grid ----------------------------------------------------
+#     ts = [round(i * step, 10) for i in range(int(1 / step) + 1)]
+#     criterion = ["sex", "income>50K"]
+#
+#     # store per-t stats
+#     mi_stats = {"mean": [], "min": [], "max": []}
+#     tvd_stats = {"mean": [], "min": [], "max": []}
+#     dp_stats = {"mean": [], "min": [], "max": []}
+#
+#     # --- run -----------------------------------------------------
+#     for t in ts:
+#         mi_rep = []
+#         tvd_rep = []
+#         dp_rep = []
+#
+#         for _ in range(repetitions):
+#             df = _make_dataset(t)
+#
+#             # NO NOISE: epsilon=None
+#             mi_val = MutualInformation(data=df[criterion].copy()).calculate([criterion], epsilon=None)
+#             tvd_val = ProxyMutualInformationTVD(data=df[criterion].copy()).calculate([criterion], epsilon=None)
+#
+#             mi_rep.append(float(mi_val))
+#             tvd_rep.append(float(tvd_val))
+#             dp_rep.append(_dp_gap(df))
+#
+#         mi_arr = np.asarray(mi_rep, dtype=float)
+#         tvd_arr = np.asarray(tvd_rep, dtype=float)
+#         dp_arr = np.asarray(dp_rep, dtype=float)
+#
+#         mi_stats["mean"].append(float(np.nanmean(mi_arr)))
+#         mi_stats["min"].append(float(np.nanmin(mi_arr)))
+#         mi_stats["max"].append(float(np.nanmax(mi_arr)))
+#
+#         tvd_stats["mean"].append(float(np.nanmean(tvd_arr)))
+#         tvd_stats["min"].append(float(np.nanmin(tvd_arr)))
+#         tvd_stats["max"].append(float(np.nanmax(tvd_arr)))
+#
+#         dp_stats["mean"].append(float(np.nanmean(dp_arr)))
+#         dp_stats["min"].append(float(np.nanmin(dp_arr)))
+#         dp_stats["max"].append(float(np.nanmax(dp_arr)))
+#
+#         print(
+#             f"t={t:.1f}  DP-gap≈{dp_stats['mean'][-1]:.3f}  "
+#             f"MI≈{mi_stats['mean'][-1]:.6f}  TVD≈{tvd_stats['mean'][-1]:.6f}"
+#         )
+#
+#     # --- plot ----------------------------------------------------
+#     plt.rcParams.update({
+#         "axes.titlesize": 20,
+#         "axes.labelsize": 30,
+#         "xtick.labelsize": 18,
+#         "ytick.labelsize": 18,
+#     })
+#
+#     fig, ax = plt.subplots(figsize=(8, 4))
+#
+#     x = np.asarray(dp_stats["mean"], dtype=float)
+#
+#     # MI line + shadow
+#     mi_mean = np.asarray(mi_stats["mean"], dtype=float)
+#     mi_min  = np.asarray(mi_stats["min"], dtype=float)
+#     mi_max  = np.asarray(mi_stats["max"], dtype=float)
+#
+#     line_mi, = ax.plot(x, mi_mean, marker="o", linewidth=2, label="MutualInformation (no noise)")
+#     mask_mi = ~np.isnan(x) & ~np.isnan(mi_min) & ~np.isnan(mi_max)
+#     if mask_mi.any():
+#         ax.fill_between(
+#             x[mask_mi], mi_min[mask_mi], mi_max[mask_mi],
+#             alpha=0.2, color=line_mi.get_color(), linewidth=0
+#         )
+#
+#     # TVD proxy line + shadow
+#     tvd_mean = np.asarray(tvd_stats["mean"], dtype=float)
+#     tvd_min  = np.asarray(tvd_stats["min"], dtype=float)
+#     tvd_max  = np.asarray(tvd_stats["max"], dtype=float)
+#
+#     line_tvd, = ax.plot(x, tvd_mean, marker="o", linewidth=2,
+#                         label="ProxyMutualInformationTVD (no noise)")
+#     mask_tvd = ~np.isnan(x) & ~np.isnan(tvd_min) & ~np.isnan(tvd_max)
+#     if mask_tvd.any():
+#         ax.fill_between(
+#             x[mask_tvd], tvd_min[mask_tvd], tvd_max[mask_tvd],
+#             alpha=0.2, color=line_tvd.get_color(), linewidth=0
+#         )
+#
+#     ax.set_xlabel("Demographic Parity gap")
+#     ax.set_ylabel("measure value")
+#     ax.grid(True, linestyle="--", alpha=0.4)
+#     ax.set_title("MI vs TVD proxy on synthetic data (no noise)")
+#
+#     os.makedirs(os.path.dirname(outfile), exist_ok=True)
+#     plt.tight_layout()
+#     plt.savefig(outfile, dpi=600, bbox_inches="tight")
+#     plt.show()
+
+
+# def run_experiment_10(
+#     repetitions: int = 5,
+#     epsilon: float = 1.0,
+#     rf_complexities: tuple[int, ...] = (10, 50, 100, 200),
+#     nn_complexities: tuple[int, ...] = (1, 2, 3, 4),
+#     outfile_rf_acc: str = "plots/experiment10_rf_accuracy.png",
+#     outfile_rf_time: str = "plots/experiment10_rf_time.png",
+#     outfile_rf_dp: str = "plots/experiment10_rf_dp.png",
+#     outfile_nn_acc: str = "plots/experiment10_nn_accuracy.png",
+#     outfile_nn_time: str = "plots/experiment10_nn_time.png",
+#     outfile_nn_dp: str = "plots/experiment10_nn_dp.png",
+# ):
+#     """
+#     Experiment 10 (IPUMS-CPS / Census):
+#     Plot, for each model separately:
+#       1) complexity parameter vs accuracy
+#       2) complexity parameter vs training time
+#       3) complexity parameter vs demographic parity
+#
+#     Models:
+#       - Random Forest: complexity = number of trees
+#       - Neural Network: complexity = number of hidden layers
+#
+#     Uses:
+#       - IPUMS-CPS dataset
+#       - all tuples
+#       - response column INCTOT
+#       - criterion [HEALTH, INCTOT, AGE]
+#
+#     Important:
+#       - NaN values are not dropped; they are converted into explicit categories.
+#     """
+#
+#     # ------------------------------------------------------------
+#     # 1. Load Census
+#     # ------------------------------------------------------------
+#     path = datasets["IPUMS-CPS"]["path"]
+#     raw_df = pd.read_csv(path)
+#
+#     # keep your existing dataset-specific preprocessing
+#     data = _encode_and_clean(path, list(raw_df.columns))
+#
+#     criterion = ["HEALTH", "INCTOT", "AGE"]
+#     protected_col = "HEALTH"
+#     response_col = "INCTOT"
+#     admissible_col = "AGE"
+#
+#     required_cols = [protected_col, admissible_col, response_col]
+#     missing = [c for c in required_cols if c not in data.columns]
+#     if missing:
+#         raise ValueError(f"Missing columns {missing}")
+#
+#     # ------------------------------------------------------------
+#     # 2. Keep NaNs and categorize them
+#     # ------------------------------------------------------------
+#     # For numeric columns: replace NaN with a sentinel category/value.
+#     # For non-numeric columns: replace NaN with string category "Missing".
+#     data = data.copy()
+#     for c in data.columns:
+#         if pd.api.types.is_numeric_dtype(data[c]):
+#             data[c] = data[c].fillna(-1)
+#         else:
+#             data[c] = data[c].astype("object").fillna("Missing")
+#
+#     n = len(data)
+#     if n < 100:
+#         raise ValueError(f"Too few rows after cleaning (n={n}).")
+#
+#     # ------------------------------------------------------------
+#     # 3. Helpers
+#     # ------------------------------------------------------------
+#     def _dp_gap(y_pred: np.ndarray, protected_values: np.ndarray) -> float:
+#         """
+#         Demographic parity gap:
+#             max_g P(ŷ = positive_label | S = g) - min_g P(ŷ = positive_label | S = g)
+#
+#         For multiclass INCTOT, we treat the largest predicted class label as the
+#         "positive" outcome to keep DP defined for this experiment.
+#         """
+#         if len(y_pred) == 0:
+#             return np.nan
+#
+#         positive_label = np.max(y_pred)
+#         pos = (y_pred == positive_label).astype(float)
+#
+#         df_eval = pd.DataFrame({
+#             "pos": pos,
+#             "s": protected_values,
+#         })
+#         rates = df_eval.groupby("s")["pos"].mean()
+#         return float(rates.max() - rates.min()) if len(rates) else np.nan
+#
+#     def _sample_census():
+#         sample = get_sample(
+#             df=data,
+#             n=n,
+#             fairness_criteria=[criterion],
+#             mode="cap",
+#         ).copy()
+#
+#         # keep NaN categories in the sampled frame too
+#         for c in sample.columns:
+#             if pd.api.types.is_numeric_dtype(sample[c]):
+#                 sample[c] = sample[c].fillna(-1)
+#             else:
+#                 sample[c] = sample[c].astype("object").fillna("Missing")
+#
+#         feature_cols = [c for c in sample.columns if c != response_col]
+#         X = sample[feature_cols].to_numpy(dtype=float)
+#         y_raw = sample[response_col].to_numpy()
+#         s = sample[protected_col].to_numpy()
+#
+#         le = LabelEncoder()
+#         y = le.fit_transform(y_raw).astype(np.int64)
+#
+#         if len(np.unique(y)) < 2:
+#             return None
+#
+#         X = MinMaxScaler().fit_transform(X)
+#         strat = y if len(np.unique(y)) > 1 else None
+#
+#         X_train, X_test, y_train, y_test, s_train, s_test = train_test_split(
+#             X, y, s,
+#             test_size=0.2,
+#             stratify=strat,
+#         )
+#         return X_train, X_test, y_train, y_test, s_train, s_test
+#
+#     def _init_stats():
+#         return {"mean": [], "min": [], "max": []}
+#
+#     def _push_stats(stats, arr):
+#         arr = np.asarray(arr, dtype=float)
+#         arr = arr[~np.isnan(arr)]
+#         if arr.size == 0:
+#             stats["mean"].append(np.nan)
+#             stats["min"].append(np.nan)
+#             stats["max"].append(np.nan)
+#         else:
+#             stats["mean"].append(float(np.mean(arr)))
+#             stats["min"].append(float(np.min(arr)))
+#             stats["max"].append(float(np.max(arr)))
+#
+#     def _train_and_eval_rf(
+#         X_train, X_test, y_train, y_test, s_test,
+#         n_estimators: int,
+#     ):
+#         classes = sorted(np.unique(y_train).tolist())
+#
+#         start_train = time.perf_counter()
+#         clf = RandomForestClassifier(
+#             n_estimators=int(n_estimators),
+#             max_depth=15,
+#             shuffle=True,
+#             classes=classes,
+#             epsilon=float(epsilon),
+#         )
+#         clf.fit(X_train, y_train)
+#         train_time = time.perf_counter() - start_train
+#
+#         y_pred = clf.predict(X_test)
+#         acc = accuracy_score(y_test, y_pred)
+#         dp = _dp_gap(y_pred, s_test)
+#         return train_time, acc, dp
+#
+#     def _train_and_eval_nn(
+#         X_train, X_test, y_train, y_test, s_test,
+#         n_layers: int,
+#     ):
+#         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#
+#         X_train_t = torch.tensor(X_train, dtype=torch.float32)
+#         y_train_t = torch.tensor(y_train, dtype=torch.long)
+#         X_test_t = torch.tensor(X_test, dtype=torch.float32).to(device)
+#
+#         train_ds = TensorDataset(X_train_t, y_train_t)
+#         batch_size = min(256, len(train_ds))
+#         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+#
+#         input_dim = X_train.shape[1]
+#         num_classes = int(len(np.unique(y_train)))
+#         epochs = 80
+#
+#         class DeepNN(nn.Module):
+#             def __init__(self, d_in: int, n_layers: int, n_out: int, hidden_dim: int = 64):
+#                 super().__init__()
+#                 layers = [nn.Linear(d_in, hidden_dim), nn.ReLU()]
+#                 for _ in range(max(0, n_layers - 1)):
+#                     layers.append(nn.Linear(hidden_dim, hidden_dim))
+#                     layers.append(nn.ReLU())
+#                 layers.append(nn.Linear(hidden_dim, n_out))
+#                 self.net = nn.Sequential(*layers)
+#
+#             def forward(self, x):
+#                 return self.net(x)
+#
+#         model = DeepNN(input_dim, int(n_layers), num_classes).to(device)
+#         criterion_loss = nn.CrossEntropyLoss()
+#         optimizer = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9)
+#
+#         privacy_engine = PrivacyEngine()
+#         model, optimizer, train_loader = privacy_engine.make_private_with_epsilon(
+#             module=model,
+#             optimizer=optimizer,
+#             data_loader=train_loader,
+#             target_epsilon=float(epsilon),
+#             target_delta=1e-5,
+#             epochs=epochs,
+#             max_grad_norm=1.0,
+#         )
+#
+#         start_train = time.perf_counter()
+#         model.train()
+#         for _ in range(epochs):
+#             for xb, yb in train_loader:
+#                 xb, yb = xb.to(device), yb.to(device)
+#                 optimizer.zero_grad()
+#                 logits = model(xb)
+#                 loss = criterion_loss(logits, yb)
+#                 loss.backward()
+#                 optimizer.step()
+#         train_time = time.perf_counter() - start_train
+#
+#         model.eval()
+#         with torch.no_grad():
+#             logits_test = model(X_test_t)
+#             y_pred = torch.argmax(logits_test, dim=1).cpu().numpy()
+#
+#         acc = accuracy_score(y_test, y_pred)
+#         dp = _dp_gap(y_pred, s_test)
+#         return train_time, acc, dp
+#
+#     def _plot_line(x, stats, xlabel, ylabel, title, outfile, color):
+#         fig, ax = plt.subplots(figsize=(8, 5))
+#
+#         y_mean = np.asarray(stats["mean"], dtype=float)
+#         y_min = np.asarray(stats["min"], dtype=float)
+#         y_max = np.asarray(stats["max"], dtype=float)
+#         x = np.asarray(x, dtype=float)
+#
+#         ax.plot(x, y_mean, marker="o", linewidth=2, color=color)
+#         mask = ~np.isnan(x) & ~np.isnan(y_mean) & ~np.isnan(y_min) & ~np.isnan(y_max)
+#         if mask.any():
+#             ax.fill_between(
+#                 x[mask],
+#                 y_min[mask],
+#                 y_max[mask],
+#                 alpha=0.2,
+#                 color=color,
+#                 linewidth=0,
+#             )
+#
+#         ax.set_xlabel(xlabel)
+#         ax.set_ylabel(ylabel)
+#         ax.set_title(title)
+#         ax.grid(True, linestyle="--", alpha=0.4)
+#
+#         os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
+#         plt.tight_layout()
+#         plt.savefig(outfile, dpi=600, bbox_inches="tight")
+#         plt.show()
+#
+#     # ------------------------------------------------------------
+#     # 4. Random Forest: trees vs accuracy/time/dp
+#     # ------------------------------------------------------------
+#     rf_acc_stats = _init_stats()
+#     rf_time_stats = _init_stats()
+#     rf_dp_stats = _init_stats()
+#
+#     for n_trees in rf_complexities:
+#         acc_rep = []
+#         time_rep = []
+#         dp_rep = []
+#
+#         for rep in range(repetitions):
+#             sampled = _sample_census()
+#             if sampled is None:
+#                 print(f"[RF trees={n_trees}] rep={rep+1}/{repetitions}: skipped")
+#                 continue
+#
+#             X_train, X_test, y_train, y_test, s_train, s_test = sampled
+#             train_time, acc, dp = _train_and_eval_rf(
+#                 X_train, X_test, y_train, y_test, s_test,
+#                 n_estimators=n_trees,
+#             )
+#
+#             acc_rep.append(acc)
+#             time_rep.append(train_time)
+#             dp_rep.append(dp)
+#
+#             print(
+#                 f"[RF trees={n_trees}] rep={rep+1}/{repetitions}: "
+#                 f"time={train_time:.3f}s acc={acc:.4f} dp={dp:.4f}"
+#             )
+#
+#         _push_stats(rf_acc_stats, acc_rep)
+#         _push_stats(rf_time_stats, time_rep)
+#         _push_stats(rf_dp_stats, dp_rep)
+#
+#     # ------------------------------------------------------------
+#     # 5. Neural Network: layers vs accuracy/time/dp
+#     # ------------------------------------------------------------
+#     nn_acc_stats = _init_stats()
+#     nn_time_stats = _init_stats()
+#     nn_dp_stats = _init_stats()
+#
+#     for n_layers in nn_complexities:
+#         acc_rep = []
+#         time_rep = []
+#         dp_rep = []
+#
+#         for rep in range(repetitions):
+#             sampled = _sample_census()
+#             if sampled is None:
+#                 print(f"[NN layers={n_layers}] rep={rep+1}/{repetitions}: skipped")
+#                 continue
+#
+#             X_train, X_test, y_train, y_test, s_train, s_test = sampled
+#             train_time, acc, dp = _train_and_eval_nn(
+#                 X_train, X_test, y_train, y_test, s_test,
+#                 n_layers=n_layers,
+#             )
+#
+#             acc_rep.append(acc)
+#             time_rep.append(train_time)
+#             dp_rep.append(dp)
+#
+#             print(
+#                 f"[NN layers={n_layers}] rep={rep+1}/{repetitions}: "
+#                 f"time={train_time:.3f}s acc={acc:.4f} dp={dp:.4f}"
+#             )
+#
+#         _push_stats(nn_acc_stats, acc_rep)
+#         _push_stats(nn_time_stats, time_rep)
+#         _push_stats(nn_dp_stats, dp_rep)
+#
+#     # round training-time stats to 3 decimals
+#     for stats in (rf_time_stats, nn_time_stats):
+#         stats["mean"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["mean"]]
+#         stats["min"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["min"]]
+#         stats["max"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["max"]]
+#
+#     plt.rcParams.update({
+#         "axes.titlesize": 18,
+#         "axes.labelsize": 22,
+#         "xtick.labelsize": 14,
+#         "ytick.labelsize": 14,
+#     })
+#
+#     # RF plots
+#     _plot_line(
+#         x=rf_complexities,
+#         stats=rf_acc_stats,
+#         xlabel="number of trees",
+#         ylabel="accuracy",
+#         title=f"Random Forest: trees vs accuracy (ε={epsilon})",
+#         outfile=outfile_rf_acc,
+#         color="violet",
+#     )
+#     _plot_line(
+#         x=rf_complexities,
+#         stats=rf_time_stats,
+#         xlabel="number of trees",
+#         ylabel="training time (s)",
+#         title=f"Random Forest: trees vs training time (ε={epsilon})",
+#         outfile=outfile_rf_time,
+#         color="violet",
+#     )
+#     _plot_line(
+#         x=rf_complexities,
+#         stats=rf_dp_stats,
+#         xlabel="number of trees",
+#         ylabel="demographic parity",
+#         title=f"Random Forest: trees vs demographic parity (ε={epsilon})",
+#         outfile=outfile_rf_dp,
+#         color="violet",
+#     )
+#
+#     # NN plots
+#     _plot_line(
+#         x=nn_complexities,
+#         stats=nn_acc_stats,
+#         xlabel="number of hidden layers",
+#         ylabel="accuracy",
+#         title=f"Neural Network: layers vs accuracy (ε={epsilon})",
+#         outfile=outfile_nn_acc,
+#         color="grey",
+#     )
+#     _plot_line(
+#         x=nn_complexities,
+#         stats=nn_time_stats,
+#         xlabel="number of hidden layers",
+#         ylabel="training time (s)",
+#         title=f"Neural Network: layers vs training time (ε={epsilon})",
+#         outfile=outfile_nn_time,
+#         color="grey",
+#     )
+#     _plot_line(
+#         x=nn_complexities,
+#         stats=nn_dp_stats,
+#         xlabel="number of hidden layers",
+#         ylabel="demographic parity",
+#         title=f"Neural Network: layers vs demographic parity (ε={epsilon})",
+#         outfile=outfile_nn_dp,
+#         color="grey",
+#     )
+
+def run_experiment_10(
+    repetitions: int = 5,
+    epsilon: float = 1.0,
+    rf_complexities: tuple[int, ...] = (10, 50, 100, 200),
+    nn_complexities: tuple[int, ...] = (1, 2, 3, 4),
+    outfile_rf_acc: str = "plots/experiment10_rf_accuracy.png",
+    outfile_rf_time: str = "plots/experiment10_rf_time.png",
+    outfile_rf_dp: str = "plots/experiment10_rf_dp.png",
+    outfile_rf_csp: str = "plots/experiment10_rf_csp.png",
+    outfile_nn_acc: str = "plots/experiment10_nn_accuracy.png",
+    outfile_nn_time: str = "plots/experiment10_nn_time.png",
+    outfile_nn_dp: str = "plots/experiment10_nn_dp.png",
+    outfile_nn_csp: str = "plots/experiment10_nn_csp.png",
 ):
     """
-    Experiment 9 (Compas):
-    Show that when exploratory conditional queries reveal stronger disparities
-    across groups, the unfairness measures also become larger.
+    Experiment 10 (Adult):
+    Plot, for each model separately:
+      1) complexity parameter vs accuracy
+      2) complexity parameter vs training time
+      3) complexity parameter vs demographic parity gap for [sex, income>50K]
+      4) complexity parameter vs conditional statistical parity gap
+         for [sex, income>50K, hours-per-week]
 
-    We use two exploratory conditional queries / fairness criteria:
+    Models:
+      - Random Forest: complexity = number of trees
+      - Neural Network: complexity = number of hidden layers
 
-      Query 1:
-        SELECT age_cat, race, AVG(is_recid)
-        FROM Compas
-        GROUP BY age_cat, race;
+    Uses:
+      - Adult dataset
+      - full dataset each repetition
+      - all columns except income>50K as training features
 
-        criterion: [race, is_recid, age_cat]
-
-      Query 2:
-        SELECT c_charge_degree, race, AVG(is_recid)
-        FROM Compas
-        GROUP BY c_charge_degree, race;
-
-        criterion: [race, is_recid, c_charge_degree]
+    Important:
+      - NaN values are not dropped; they are converted into explicit categories.
     """
 
-    # ---------------- helpers ----------------
+    # ------------------------------------------------------------
+    # 1. Load Adult
+    # ------------------------------------------------------------
+    path = datasets["Adult"]["path"]
+    raw_df = pd.read_csv(path)
+    data = _encode_and_clean(path, list(raw_df.columns))
 
-    def _write_csv_strict(df: pd.DataFrame, path: str) -> None:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        df.to_csv(path, index=False)
+    protected_col = "sex"
+    response_col = "income>50K"
+    admissible_col = "hours-per-week"
 
-    def _densify_columns(df: pd.DataFrame) -> pd.DataFrame:
-        out = df.copy()
-        for c in out.columns:
-            codes, _ = pd.factorize(out[c], sort=False)
-            out[c] = codes.astype(np.int64)
-        return out
+    required_cols = [protected_col, response_col, admissible_col]
+    missing = [c for c in required_cols if c not in data.columns]
+    if missing:
+        raise ValueError(f"Missing columns {missing}")
 
-    def _criterion_label(crit):
-        if len(crit) == 2:
-            return f"{crit[0]}, {crit[1]}"
-        return f"{crit[0]}, {crit[1]} | {crit[2]}"
+    # ------------------------------------------------------------
+    # 2. Keep NaNs and categorize them
+    # ------------------------------------------------------------
+    data = data.copy()
+    for c in data.columns:
+        if pd.api.types.is_numeric_dtype(data[c]):
+            data[c] = data[c].fillna(-1)
+        else:
+            data[c] = data[c].astype("object").fillna("Missing")
 
-    def _query_string(crit):
-        s, y, a = crit
-        return f"SELECT {a}, {s}, AVG({y}) FROM {dataset_name} GROUP BY {a}, {s};"
+    if len(data) < 100:
+        raise ValueError(f"Too few rows after preprocessing (n={len(data)}).")
 
-    def _conditional_story_stats(sample: pd.DataFrame, s_col: str, y_col: str, a_col: str):
-        total = len(sample)
-        disparity = 0.0
-        subgroup_rates = []
+    # ------------------------------------------------------------
+    # 3. Helpers
+    # ------------------------------------------------------------
+    def _dp_gap(y_pred: np.ndarray, protected_values: np.ndarray) -> float:
+        if len(y_pred) == 0:
+            return np.nan
+        pos = (y_pred == 1).astype(float)
+        rates = pd.Series(pos).groupby(pd.Series(protected_values)).mean()
+        return float(rates.max() - rates.min()) if len(rates) else np.nan
 
-        for _, grp_a in sample.groupby(a_col):
-            mean_a = float(grp_a[y_col].mean())
+    def _csp_gap(
+        y_pred: np.ndarray,
+        protected_values: np.ndarray,
+        admissible_values: np.ndarray,
+    ) -> float:
+        if len(y_pred) == 0:
+            return np.nan
 
-            grouped = grp_a.groupby(s_col)[y_col]
-            means = grouped.mean()
-            counts = grouped.size()
-            weights = counts / counts.sum()
+        pos = (y_pred == 1).astype(float)
+        df_eval = pd.DataFrame({
+            "pos": pos,
+            "s": protected_values,
+            "a": admissible_values,
+        })
 
-            subgroup_rates.extend(means.tolist())
+        gaps = []
+        weights = []
+        for _, grp in df_eval.groupby("a", dropna=False):
+            rates = grp["pos"].groupby(grp["s"]).mean()
+            if len(rates) == 0:
+                continue
+            gaps.append(float(rates.max() - rates.min()))
+            weights.append(len(grp))
 
-            weight_a = len(grp_a) / total
-            disparity_a = float((weights * (means - mean_a).abs()).sum())
-            disparity += weight_a * disparity_a
+        return float(np.average(gaps, weights=weights)) if gaps else np.nan
 
-        return {
-            "min_group_rate": float(np.min(subgroup_rates)),
-            "max_group_rate": float(np.max(subgroup_rates)),
-            "query_disparity": float(disparity),
-        }
+    def _prepare_split():
+        # use FULL dataset, not a sample, and all features except the target
+        df = data.copy()
 
-    # ---------------- load data ----------------
+        feature_cols = [c for c in df.columns if c != response_col]
+        X = df[feature_cols].to_numpy(dtype=float)
+        y_raw = df[response_col].to_numpy()
+        s = df[protected_col].to_numpy()
+        a = df[admissible_col].to_numpy()
 
-    if dataset_name not in datasets:
-        raise ValueError(f"Unknown dataset_name='{dataset_name}'")
+        le = LabelEncoder()
+        y = le.fit_transform(y_raw).astype(np.int64)
 
-    path = datasets[dataset_name]["path"]
+        if len(np.unique(y)) < 2:
+            return None
+
+        X = MinMaxScaler().fit_transform(X)
+        strat = y if len(np.unique(y)) > 1 else None
+
+        X_train, X_test, y_train, y_test, s_train, s_test, a_train, a_test = train_test_split(
+            X, y, s, a,
+            test_size=0.2,
+            stratify=strat,
+        )
+        return X_train, X_test, y_train, y_test, s_test, a_test
+
+    def _init_stats():
+        return {"mean": [], "min": [], "max": []}
+
+    def _push_stats(stats, arr):
+        arr = np.asarray(arr, dtype=float)
+        arr = arr[~np.isnan(arr)]
+        if arr.size == 0:
+            stats["mean"].append(np.nan)
+            stats["min"].append(np.nan)
+            stats["max"].append(np.nan)
+        else:
+            stats["mean"].append(float(np.mean(arr)))
+            stats["min"].append(float(np.min(arr)))
+            stats["max"].append(float(np.max(arr)))
+
+    def _train_and_eval_rf(
+        X_train, X_test, y_train, y_test, s_test, a_test,
+        n_estimators: int,
+    ):
+        classes = sorted(np.unique(y_train).tolist())
+
+        start_train = time.perf_counter()
+        clf = RandomForestClassifier(
+            n_estimators=int(n_estimators),
+            max_depth=15,
+            shuffle=True,
+            classes=classes,
+            epsilon=float(epsilon),
+        )
+        clf.fit(X_train, y_train)
+        train_time = time.perf_counter() - start_train
+
+        y_pred = clf.predict(X_test)
+        acc = accuracy_score(y_test, y_pred)
+        dp = _dp_gap(y_pred, s_test)
+        csp = _csp_gap(y_pred, s_test, a_test)
+        return train_time, acc, dp, csp
+
+    def _train_and_eval_nn(
+        X_train, X_test, y_train, y_test, s_test, a_test,
+        n_layers: int,
+    ):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        X_train_t = torch.tensor(X_train, dtype=torch.float32)
+        y_train_t = torch.tensor(y_train, dtype=torch.long)
+        X_test_t = torch.tensor(X_test, dtype=torch.float32).to(device)
+
+        train_ds = TensorDataset(X_train_t, y_train_t)
+        batch_size = min(256, len(train_ds))
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+
+        input_dim = X_train.shape[1]
+        num_classes = int(len(np.unique(y_train)))
+        epochs = 80
+
+        class DeepNN(nn.Module):
+            def __init__(self, d_in: int, n_layers: int, n_out: int, hidden_dim: int = 64):
+                super().__init__()
+                layers = [nn.Linear(d_in, hidden_dim), nn.ReLU()]
+                for _ in range(max(0, n_layers - 1)):
+                    layers.append(nn.Linear(hidden_dim, hidden_dim))
+                    layers.append(nn.ReLU())
+                layers.append(nn.Linear(hidden_dim, n_out))
+                self.net = nn.Sequential(*layers)
+
+            def forward(self, x):
+                return self.net(x)
+
+        model = DeepNN(input_dim, int(n_layers), num_classes).to(device)
+        criterion_loss = nn.CrossEntropyLoss()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9)
+
+        privacy_engine = PrivacyEngine()
+        model, optimizer, train_loader = privacy_engine.make_private_with_epsilon(
+            module=model,
+            optimizer=optimizer,
+            data_loader=train_loader,
+            target_epsilon=float(epsilon),
+            target_delta=1e-5,
+            epochs=epochs,
+            max_grad_norm=1.0,
+        )
+
+        start_train = time.perf_counter()
+        model.train()
+        for _ in range(epochs):
+            for xb, yb in train_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                optimizer.zero_grad()
+                logits = model(xb)
+                loss = criterion_loss(logits, yb)
+                loss.backward()
+                optimizer.step()
+        train_time = time.perf_counter() - start_train
+
+        model.eval()
+        with torch.no_grad():
+            logits_test = model(X_test_t)
+            y_pred = torch.argmax(logits_test, dim=1).cpu().numpy()
+
+        acc = accuracy_score(y_test, y_pred)
+        dp = _dp_gap(y_pred, s_test)
+        csp = _csp_gap(y_pred, s_test, a_test)
+        return train_time, acc, dp, csp
+
+    def _plot_line(x, stats, xlabel, ylabel, title, outfile, color):
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        y_mean = np.asarray(stats["mean"], dtype=float)
+        y_min = np.asarray(stats["min"], dtype=float)
+        y_max = np.asarray(stats["max"], dtype=float)
+        x = np.asarray(x, dtype=float)
+
+        ax.plot(x, y_mean, marker="o", linewidth=2, color=color)
+        mask = ~np.isnan(x) & ~np.isnan(y_mean) & ~np.isnan(y_min) & ~np.isnan(y_max)
+        if mask.any():
+            ax.fill_between(
+                x[mask],
+                y_min[mask],
+                y_max[mask],
+                alpha=0.2,
+                color=color,
+                linewidth=0,
+            )
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True, linestyle="--", alpha=0.4)
+
+        os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
+        plt.tight_layout()
+        plt.savefig(outfile, dpi=600, bbox_inches="tight")
+        plt.show()
+
+    # ------------------------------------------------------------
+    # 4. Random Forest: trees vs accuracy/time/dp/csp
+    # ------------------------------------------------------------
+    rf_acc_stats = _init_stats()
+    rf_time_stats = _init_stats()
+    rf_dp_stats = _init_stats()
+    rf_csp_stats = _init_stats()
+
+    for n_trees in rf_complexities:
+        acc_rep = []
+        time_rep = []
+        dp_rep = []
+        csp_rep = []
+
+        for rep in range(repetitions):
+            prepared = _prepare_split()
+            if prepared is None:
+                print(f"[RF trees={n_trees}] rep={rep+1}/{repetitions}: skipped")
+                continue
+
+            X_train, X_test, y_train, y_test, s_test, a_test = prepared
+            train_time, acc, dp, csp = _train_and_eval_rf(
+                X_train, X_test, y_train, y_test, s_test, a_test,
+                n_estimators=n_trees,
+            )
+
+            acc_rep.append(acc)
+            time_rep.append(train_time)
+            dp_rep.append(dp)
+            csp_rep.append(csp)
+
+            print(
+                f"[RF trees={n_trees}] rep={rep+1}/{repetitions}: "
+                f"time={train_time:.3f}s acc={acc:.4f} dp={dp:.4f} csp={csp:.4f}"
+            )
+
+        _push_stats(rf_acc_stats, acc_rep)
+        _push_stats(rf_time_stats, time_rep)
+        _push_stats(rf_dp_stats, dp_rep)
+        _push_stats(rf_csp_stats, csp_rep)
+
+    # ------------------------------------------------------------
+    # 5. Neural Network: layers vs accuracy/time/dp/csp
+    # ------------------------------------------------------------
+    nn_acc_stats = _init_stats()
+    nn_time_stats = _init_stats()
+    nn_dp_stats = _init_stats()
+    nn_csp_stats = _init_stats()
+
+    for n_layers in nn_complexities:
+        acc_rep = []
+        time_rep = []
+        dp_rep = []
+        csp_rep = []
+
+        for rep in range(repetitions):
+            prepared = _prepare_split()
+            if prepared is None:
+                print(f"[NN layers={n_layers}] rep={rep+1}/{repetitions}: skipped")
+                continue
+
+            X_train, X_test, y_train, y_test, s_test, a_test = prepared
+            train_time, acc, dp, csp = _train_and_eval_nn(
+                X_train, X_test, y_train, y_test, s_test, a_test,
+                n_layers=n_layers,
+            )
+
+            acc_rep.append(acc)
+            time_rep.append(train_time)
+            dp_rep.append(dp)
+            csp_rep.append(csp)
+
+            print(
+                f"[NN layers={n_layers}] rep={rep+1}/{repetitions}: "
+                f"time={train_time:.3f}s acc={acc:.4f} dp={dp:.4f} csp={csp:.4f}"
+            )
+
+        _push_stats(nn_acc_stats, acc_rep)
+        _push_stats(nn_time_stats, time_rep)
+        _push_stats(nn_dp_stats, dp_rep)
+        _push_stats(nn_csp_stats, csp_rep)
+
+    # round training-time stats to 3 decimals
+    for stats in (rf_time_stats, nn_time_stats):
+        stats["mean"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["mean"]]
+        stats["min"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["min"]]
+        stats["max"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["max"]]
+
+    plt.rcParams.update({
+        "axes.titlesize": 18,
+        "axes.labelsize": 22,
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
+    })
+
+    # RF plots
+    _plot_line(
+        x=rf_complexities,
+        stats=rf_acc_stats,
+        xlabel="number of trees",
+        ylabel="accuracy",
+        title=f"Random Forest: trees vs accuracy (ε={epsilon})",
+        outfile=outfile_rf_acc,
+        color="violet",
+    )
+    _plot_line(
+        x=rf_complexities,
+        stats=rf_time_stats,
+        xlabel="number of trees",
+        ylabel="training time (s)",
+        title=f"Random Forest: trees vs training time (ε={epsilon})",
+        outfile=outfile_rf_time,
+        color="violet",
+    )
+    _plot_line(
+        x=rf_complexities,
+        stats=rf_dp_stats,
+        xlabel="number of trees",
+        ylabel="demographic parity gap",
+        title=f"Random Forest: trees vs demographic parity gap (ε={epsilon})",
+        outfile=outfile_rf_dp,
+        color="violet",
+    )
+    _plot_line(
+        x=rf_complexities,
+        stats=rf_csp_stats,
+        xlabel="number of trees",
+        ylabel="conditional statistical parity gap",
+        title=f"Random Forest: trees vs conditional statistical parity gap (ε={epsilon})",
+        outfile=outfile_rf_csp,
+        color="violet",
+    )
+
+    # NN plots
+    _plot_line(
+        x=nn_complexities,
+        stats=nn_acc_stats,
+        xlabel="number of hidden layers",
+        ylabel="accuracy",
+        title=f"Neural Network: layers vs accuracy (ε={epsilon})",
+        outfile=outfile_nn_acc,
+        color="grey",
+    )
+    _plot_line(
+        x=nn_complexities,
+        stats=nn_time_stats,
+        xlabel="number of hidden layers",
+        ylabel="training time (s)",
+        title=f"Neural Network: layers vs training time (ε={epsilon})",
+        outfile=outfile_nn_time,
+        color="grey",
+    )
+    _plot_line(
+        x=nn_complexities,
+        stats=nn_dp_stats,
+        xlabel="number of hidden layers",
+        ylabel="demographic parity gap",
+        title=f"Neural Network: layers vs demographic parity gap (ε={epsilon})",
+        outfile=outfile_nn_dp,
+        color="grey",
+    )
+    _plot_line(
+        x=nn_complexities,
+        stats=nn_csp_stats,
+        xlabel="number of hidden layers",
+        ylabel="conditional statistical parity gap",
+        title=f"Neural Network: layers vs conditional statistical parity gap (ε={epsilon})",
+        outfile=outfile_nn_csp,
+        color="grey",
+    )
+
+def run_experiment_10_measures(
+    repetitions: int = 5,
+    epsilon: float = 1.0,
+    num_tuples: int | None = None,
+    outfile_tvd: str = "plots/experiment10_tvd.png",
+    outfile_repair: str = "plots/experiment10_repair.png",
+    outfile_tc: str = "plots/experiment10_tc.png",
+):
+    """
+    Plot unfairness-measure values for two Adult fairness criteria, using the same
+    sampled data in each repetition for all measures and both criteria.
+    """
+
+    # ------------------------------------------------------------
+    # 1. Load Adult
+    # ------------------------------------------------------------
+    path = datasets["Adult"]["path"]
     raw_df = pd.read_csv(path)
     data = _encode_and_clean(path, list(raw_df.columns))
 
     criteria = [
-        ["race", "is_recid", "age_cat"],
-        ["race", "is_recid", "c_charge_degree"],
+        ["sex", "income>50K"],
+        ["sex", "income>50K", "hours-per-week"],
     ]
 
     required_cols = sorted(set(c for crit in criteria for c in crit))
@@ -3006,322 +3934,206 @@ def run_experiment_9_compas(
     if missing:
         raise ValueError(f"Missing columns {missing}")
 
-    n = min(num_tuples, len(data))
+    # ------------------------------------------------------------
+    # 2. Keep NaNs and categorize them
+    # ------------------------------------------------------------
+    data = data.copy()
+    for c in data.columns:
+        if pd.api.types.is_numeric_dtype(data[c]):
+            data[c] = data[c].fillna(-1)
+        else:
+            data[c] = data[c].astype("object").fillna("Missing")
 
-    # ---------------- compute query disparities ----------------
+    if len(data) < 100:
+        raise ValueError(f"Too few rows after preprocessing (n={len(data)}).")
 
-    story_rows = []
+    n = len(data) if num_tuples is None else min(num_tuples, len(data))
 
+    # ------------------------------------------------------------
+    # 3. Helpers
+    # ------------------------------------------------------------
+    def _densify_columns(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        for c in out.columns:
+            codes, _ = pd.factorize(out[c], sort=False)
+            out[c] = codes.astype(np.int64)
+        return out
+
+    def _criterion_label(criterion: list[str]) -> str:
+        if len(criterion) == 2:
+            return f"{criterion[0]} ⟂ {criterion[1]}"
+        return f"{criterion[0]} ⟂ {criterion[1]} | {criterion[2]}"
+
+    def _init_stats():
+        return {"mean": [], "min": [], "max": []}
+
+    def _push_stats(stats, arr):
+        arr = np.asarray(arr, dtype=float)
+        arr = arr[~np.isnan(arr)]
+        if arr.size == 0:
+            stats["mean"].append(np.nan)
+            stats["min"].append(np.nan)
+            stats["max"].append(np.nan)
+        else:
+            stats["mean"].append(float(np.mean(arr)))
+            stats["min"].append(float(np.min(arr)))
+            stats["max"].append(float(np.max(arr)))
+
+    def _plot_line(x, stats, xticklabels, xlabel, ylabel, title, outfile, color):
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        y_mean = np.asarray(stats["mean"], dtype=float)
+        y_min = np.asarray(stats["min"], dtype=float)
+        y_max = np.asarray(stats["max"], dtype=float)
+        x = np.asarray(x, dtype=float)
+
+        ax.plot(x, y_mean, marker="o", linewidth=2, color=color)
+        mask = ~np.isnan(x) & ~np.isnan(y_mean) & ~np.isnan(y_min) & ~np.isnan(y_max)
+        if mask.any():
+            ax.fill_between(
+                x[mask],
+                y_min[mask],
+                y_max[mask],
+                alpha=0.2,
+                color=color,
+                linewidth=0,
+            )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(xticklabels)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True, linestyle="--", alpha=0.4)
+
+        os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
+        plt.tight_layout()
+        plt.savefig(outfile, dpi=600, bbox_inches="tight")
+        plt.show()
+
+    # ------------------------------------------------------------
+    # 4. Storage: one list per criterion per measure
+    # ------------------------------------------------------------
+    tvd_per_criterion = [[] for _ in criteria]
+    repair_per_criterion = [[] for _ in criteria]
+    tc_per_criterion = [[] for _ in criteria]
+
+    # ------------------------------------------------------------
+    # 5. Run measures on the SAME sample per repetition
+    # ------------------------------------------------------------
     for rep in range(repetitions):
-
         sample = get_sample(
             df=data,
             n=n,
             fairness_criteria=criteria,
+            mode="cap",
         ).copy()
 
-        for _, y_col, _ in criteria:
-            sample[y_col] = pd.to_numeric(sample[y_col], errors="coerce").astype(float)
+        print(f"\n=== Repetition {rep+1}/{repetitions} ===")
 
-        for crit in criteria:
+        for i, criterion in enumerate(criteria):
+            sub = _densify_columns(sample[criterion].copy())
 
-            s_col, y_col, a_col = crit
-            crit_label = _criterion_label(crit)
-            query_sql = _query_string(crit)
+            tvd_val = ProxyMutualInformationTVD(data=sub).calculate([criterion], epsilon=epsilon)
+            repair_val = ProxyRepairMaxSat(data=sub).calculate([criterion], epsilon=epsilon)
+            tc_val = TupleContribution(data=sub).calculate([criterion], epsilon=epsilon)
 
-            stats = _conditional_story_stats(sample, s_col, y_col, a_col)
+            tvd_per_criterion[i].append(float(tvd_val))
+            repair_per_criterion[i].append(float(repair_val))
+            tc_per_criterion[i].append(float(tc_val))
 
-            story_rows.append({
-                "criterion": crit_label,
-                "query": query_sql,
-                **stats,
-            })
+            print(
+                f"[criterion={criterion}] rep={rep+1}/{repetitions}: "
+                f"tvd={float(tvd_val):.6f} "
+                f"repair={float(repair_val):.6f} "
+                f"tc={float(tc_val):.6f}"
+            )
 
-    df_story = (
-        pd.DataFrame(story_rows)
-        .groupby(["criterion", "query"], as_index=False)
-        .agg(
-            min_group_rate=("min_group_rate", "mean"),
-            max_group_rate=("max_group_rate", "mean"),
-            query_disparity=("query_disparity", "mean"),
-        )
-        .sort_values("query_disparity", ascending=False)
-        .reset_index(drop=True)
-    )
+    # ------------------------------------------------------------
+    # 6. Aggregate stats
+    # ------------------------------------------------------------
+    tvd_stats = _init_stats()
+    repair_stats = _init_stats()
+    tc_stats = _init_stats()
 
-    # ---------------- compute unfairness measures ----------------
+    for i in range(len(criteria)):
+        _push_stats(tvd_stats, tvd_per_criterion[i])
+        _push_stats(repair_stats, repair_per_criterion[i])
+        _push_stats(tc_stats, tc_per_criterion[i])
 
-    measure_rows = []
-
-    for crit in criteria:
-
-        crit_label = _criterion_label(crit)
-
-        mi_vals = []
-        tvd_vals = []
-        repair_vals = []
-        tc_vals = []
-
-        for _ in range(repetitions):
-
-            sample = get_sample(
-                df=data,
-                n=n,
-                fairness_criteria=criteria,
-            ).copy()
-
-            sub = _densify_columns(sample[crit].copy())
-
-            mi_vals.append(float(MutualInformation(data=sub).calculate([crit], epsilon=epsilon)))
-            tvd_vals.append(float(ProxyMutualInformationTVD(data=sub).calculate([crit], epsilon=epsilon)))
-            repair_vals.append(float(ProxyRepairMaxSat(data=sub).calculate([crit], epsilon=epsilon)))
-            tc_vals.append(float(TupleContribution(data=sub).calculate([crit], epsilon=epsilon)))
-
-        measure_rows.append({
-            "criterion": crit_label,
-            "MutualInformation": float(np.mean(mi_vals)),
-            "ProxyMutualInformationTVD": float(np.mean(tvd_vals)),
-            "ProxyRepairMaxSat": float(np.mean(repair_vals)),
-            "TupleContribution": float(np.mean(tc_vals)),
-        })
-
-    df_measures = pd.DataFrame(measure_rows)
-
-    # ---------------- merge ----------------
-
-    df_summary = (
-        df_story.merge(df_measures, on="criterion", how="inner")
-        .sort_values("query_disparity", ascending=False)
-        .reset_index(drop=True)
-    )
-
-    # ---------------- kendall tau ----------------
-
-    kendall_rows = []
-
-    for col in [
-        "MutualInformation",
-        "ProxyMutualInformationTVD",
-        "ProxyRepairMaxSat",
-        "TupleContribution",
-    ]:
-        tau, pval = kendalltau(df_summary["query_disparity"], df_summary[col])
-
-        kendall_rows.append({
-            "measure": col,
-            "kendall_tau": float(tau),
-            "p_value": float(pval),
-        })
-
-    df_kendall = pd.DataFrame(kendall_rows)
-
-    # ---------------- save ----------------
-
-    _write_csv_strict(df_summary, outfile_csv_summary)
-    _write_csv_strict(df_kendall, outfile_csv_kendall)
-
-    # ---------------- print tables ----------------
-
-    print("\n" + "=" * 100)
-    print("QUERY DISPARITY VS MEASURES")
-    print("=" * 100)
-    with pd.option_context(
-            "display.max_rows", 50,
-            "display.max_columns", 20,
-            "display.width", 1000,
-            "display.max_colwidth", None,
-    ):
-        print(df_summary)
-
-    print("\n" + "=" * 100)
-    print("KENDALL TAU WITH QUERY DISPARITY")
-    print("=" * 100)
-    with pd.option_context(
-            "display.max_rows", 50,
-            "display.max_columns", 20,
-            "display.width", 1000,
-            "display.max_colwidth", None,
-    ):
-        print(df_kendall)
-
-
-def run_experiment_10(
-    step: float = 0.1,
-    n_per_sex: int = 100000,
-    repetitions: int = 10,
-    outfile: str = "plots/experiment10.png",
-):
-    """
-    Experiment 10 (synthetic, NO-NOISE):
-    Measure *true* MutualInformation (MI) vs ProxyMutualInformationTVD (TVD proxy)
-    on the same synthetic 2x2 dataset used in run_experiment_7, while we increase unfairness.
-
-    - We keep the same unfairness construction:
-        Start fair: P(income=1|sex=0)=0.5, P(income=1|sex=1)=0.5
-        Increase t in [0,1] by 'step':
-            flip t fraction of (male, income=0) -> income=1
-            flip t fraction of (female, income=1) -> income=0
-      At t=1: males always income=1, females always income=0.
-
-    - For each t, we compute over 'repetitions':
-        * MI(sex ; income>50K) with epsilon=None
-        * TVD proxy on [sex, income>50K] with epsilon=None
-        * DP-gap (as a sanity x-axis / interpretability)
-      We plot MI and TVD vs DP-gap, with min..max shadow bands.
-    """
-
-    # --- helpers -------------------------------------------------
-    def _make_dataset(t: float) -> pd.DataFrame:
-        """
-        Create synthetic dataset for a given unfairness level t in [0,1].
-        sex: 1=male, 0=female
-        income: 1=income>50K, 0=otherwise
-        """
-        n = int(n_per_sex)
-
-        # Base fair allocation:
-        m0 = n // 2
-        m1 = n - m0
-        f0 = n // 2
-        f1 = n - f0
-
-        flip_m = int(round(t * m0))  # male: 0 -> 1
-        flip_f = int(round(t * f1))  # female: 1 -> 0
-
-        m0_new = m0 - flip_m
-        m1_new = m1 + flip_m
-        f1_new = f1 - flip_f
-        f0_new = f0 + flip_f
-
-        sex = np.concatenate([
-            np.ones(m0_new + m1_new, dtype=int),   # males = 1
-            np.zeros(f0_new + f1_new, dtype=int),  # females = 0
-        ])
-        income = np.concatenate([
-            np.concatenate([np.zeros(m0_new, dtype=int), np.ones(m1_new, dtype=int)]),
-            np.concatenate([np.zeros(f0_new, dtype=int), np.ones(f1_new, dtype=int)]),
-        ])
-
-        df = pd.DataFrame({"sex": sex, "income>50K": income})
-        df = df.sample(frac=1.0, replace=False).reset_index(drop=True)
-        return df
-
-    def _dp_gap(df: pd.DataFrame) -> float:
-        rates = df.groupby("sex")["income>50K"].mean()
-        return float(abs(rates.max() - rates.min())) if len(rates) else 0.0
-
-    # --- grid ----------------------------------------------------
-    ts = [round(i * step, 10) for i in range(int(1 / step) + 1)]
-    criterion = ["sex", "income>50K"]
-
-    # store per-t stats
-    mi_stats = {"mean": [], "min": [], "max": []}
-    tvd_stats = {"mean": [], "min": [], "max": []}
-    dp_stats = {"mean": [], "min": [], "max": []}
-
-    # --- run -----------------------------------------------------
-    for t in ts:
-        mi_rep = []
-        tvd_rep = []
-        dp_rep = []
-
-        for _ in range(repetitions):
-            df = _make_dataset(t)
-
-            # NO NOISE: epsilon=None
-            mi_val = MutualInformation(data=df[criterion].copy()).calculate([criterion], epsilon=None)
-            tvd_val = ProxyMutualInformationTVD(data=df[criterion].copy()).calculate([criterion], epsilon=None)
-
-            mi_rep.append(float(mi_val))
-            tvd_rep.append(float(tvd_val))
-            dp_rep.append(_dp_gap(df))
-
-        mi_arr = np.asarray(mi_rep, dtype=float)
-        tvd_arr = np.asarray(tvd_rep, dtype=float)
-        dp_arr = np.asarray(dp_rep, dtype=float)
-
-        mi_stats["mean"].append(float(np.nanmean(mi_arr)))
-        mi_stats["min"].append(float(np.nanmin(mi_arr)))
-        mi_stats["max"].append(float(np.nanmax(mi_arr)))
-
-        tvd_stats["mean"].append(float(np.nanmean(tvd_arr)))
-        tvd_stats["min"].append(float(np.nanmin(tvd_arr)))
-        tvd_stats["max"].append(float(np.nanmax(tvd_arr)))
-
-        dp_stats["mean"].append(float(np.nanmean(dp_arr)))
-        dp_stats["min"].append(float(np.nanmin(dp_arr)))
-        dp_stats["max"].append(float(np.nanmax(dp_arr)))
-
-        print(
-            f"t={t:.1f}  DP-gap≈{dp_stats['mean'][-1]:.3f}  "
-            f"MI≈{mi_stats['mean'][-1]:.6f}  TVD≈{tvd_stats['mean'][-1]:.6f}"
-        )
-
-    # --- plot ----------------------------------------------------
+    # ------------------------------------------------------------
+    # 7. Plot
+    # ------------------------------------------------------------
     plt.rcParams.update({
-        "axes.titlesize": 20,
-        "axes.labelsize": 30,
-        "xtick.labelsize": 18,
-        "ytick.labelsize": 18,
+        "axes.titlesize": 18,
+        "axes.labelsize": 22,
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
     })
 
-    fig, ax = plt.subplots(figsize=(8, 4))
+    x = np.arange(1, len(criteria) + 1)
+    xticklabels = [str(i) for i in x]
 
-    x = np.asarray(dp_stats["mean"], dtype=float)
+    _plot_line(
+        x=x,
+        stats=tvd_stats,
+        xticklabels=xticklabels,
+        xlabel="criterion",
+        ylabel="measure value",
+        title=f"{r'$\mutualproxytvd$'} on Adult (ε={epsilon})",
+        outfile=outfile_tvd,
+        color="tab:blue",
+    )
 
-    # MI line + shadow
-    mi_mean = np.asarray(mi_stats["mean"], dtype=float)
-    mi_min  = np.asarray(mi_stats["min"], dtype=float)
-    mi_max  = np.asarray(mi_stats["max"], dtype=float)
+    _plot_line(
+        x=x,
+        stats=repair_stats,
+        xticklabels=xticklabels,
+        xlabel="criterion",
+        ylabel="measure value",
+        title=f"{r'$\repairsat$'} on Adult (ε={epsilon})",
+        outfile=outfile_repair,
+        color="tab:orange",
+    )
 
-    line_mi, = ax.plot(x, mi_mean, marker="o", linewidth=2, label="MutualInformation (no noise)")
-    mask_mi = ~np.isnan(x) & ~np.isnan(mi_min) & ~np.isnan(mi_max)
-    if mask_mi.any():
-        ax.fill_between(
-            x[mask_mi], mi_min[mask_mi], mi_max[mask_mi],
-            alpha=0.2, color=line_mi.get_color(), linewidth=0
+    _plot_line(
+        x=x,
+        stats=tc_stats,
+        xticklabels=xticklabels,
+        xlabel="criterion",
+        ylabel="measure value",
+        title=f"{r'$\contribution$'} on Adult (ε={epsilon})",
+        outfile=outfile_tc,
+        color="tab:green",
+    )
+
+    # ------------------------------------------------------------
+    # 8. Print summary
+    # ------------------------------------------------------------
+    print("\n=== Summary ===")
+    for i, criterion in enumerate(criteria):
+        print(
+            f"Criterion {i+1} ({_criterion_label(criterion)}): "
+            f"TVD={tvd_stats['mean'][i]:.6f}, "
+            f"Repair={repair_stats['mean'][i]:.6f}, "
+            f"TC={tc_stats['mean'][i]:.6f}"
         )
-
-    # TVD proxy line + shadow
-    tvd_mean = np.asarray(tvd_stats["mean"], dtype=float)
-    tvd_min  = np.asarray(tvd_stats["min"], dtype=float)
-    tvd_max  = np.asarray(tvd_stats["max"], dtype=float)
-
-    line_tvd, = ax.plot(x, tvd_mean, marker="o", linewidth=2,
-                        label="ProxyMutualInformationTVD (no noise)")
-    mask_tvd = ~np.isnan(x) & ~np.isnan(tvd_min) & ~np.isnan(tvd_max)
-    if mask_tvd.any():
-        ax.fill_between(
-            x[mask_tvd], tvd_min[mask_tvd], tvd_max[mask_tvd],
-            alpha=0.2, color=line_tvd.get_color(), linewidth=0
-        )
-
-    ax.set_xlabel("Demographic Parity gap")
-    ax.set_ylabel("measure value")
-    ax.grid(True, linestyle="--", alpha=0.4)
-    ax.set_title("MI vs TVD proxy on synthetic data (no noise)")
-
-    os.makedirs(os.path.dirname(outfile), exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(outfile, dpi=600, bbox_inches="tight")
-    plt.show()
 
 
 if __name__ == "__main__":
-    # create_plot_0()
-    # create_plot_1()
-    # create_plot_2()
-    # create_plot_3()
-    # create_plot_4()
-    # plot_legend()
-    # run_experiment_1()
-    # run_experiment_2()
-    # run_experiment_3()
-    # run_experiment_4()
-    # run_experiment_5()
-    # run_experiment_6()
-    # run_experiment_7()
-    # run_experiment_8()
-    # run_experiment_9_adult()
-    run_experiment_9_compas()
-    # run_experiment_10()
+    create_plot_0()
+    create_plot_1()
+    create_plot_2()
+    create_plot_3()
+    create_plot_4()
+    plot_legend()
+    run_experiment_1()
+    run_experiment_2()
+    run_experiment_3()
+    run_experiment_4()
+    run_experiment_5()
+    run_experiment_6()
+    run_experiment_7()
+    run_experiment_8()
+    run_experiment_9()
+    run_experiment_10()
