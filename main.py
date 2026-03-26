@@ -1319,6 +1319,18 @@ def create_plot_4(
 
 
 ######################################### Experiments ##########################################
+# UNCOMMENT TO RUN LEGENDS:
+
+# plt.rcParams["mathtext.fontset"] = "cm"
+# plt.rcParams["font.family"] = "serif"
+
+# measures = {
+    # r"$\mathcal{U}_{MI}$": MutualInformation,
+    # r"Algorithm 1 ($\mathcal{U}_{MI}^{TVD}$)": ProxyMutualInformationTVD,
+    # "Algorithm 2 ($\mathcal{U}_{R}^{SAT}$)": ProxyRepairMaxSat,
+    # "Algorithm 2 ($\\mathcal{U}_{R}^{SAT}$)\nwith heuristic": ProxyRepairMaxSat,
+    # r"Algorithm 3 ($\mathcal{U}_{TC}$)": TupleContribution
+# }
 
 measures = {
     "Proxy Mutual Information TVD": ProxyMutualInformationTVD,
@@ -1374,17 +1386,23 @@ def _encode_and_clean(data_path, cols):
     return df
 
 
-def plot_legend(outfile="plots/legend_proxies.png"):
+def plot_legend(outfile="plots/legend.png"):
     """
     Create and save a standalone legend figure for the unfairness measures.
     """
-    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    # Explicit color mapping (MI = light red)
+    custom_colors = [
+        # "#ff6b6b",  # light red (MI)
+        "#1f77b4",  # blue
+        "#ff7f0e",  # orange
+        "#2ca02c",  # green
+    ]
     fig, ax = plt.subplots(figsize=(8, 1.6))
     handles = []
     for i, label in enumerate(measures.keys()):
         line = MplLine2D(
             [2, 3], [2, 2],
-            color=colors[i % len(colors)],
+            color=custom_colors[i % len(custom_colors)],
             marker="o",
             linestyle="-",
             linewidth=2,
@@ -1398,15 +1416,20 @@ def plot_legend(outfile="plots/legend_proxies.png"):
     ax.set_yticks([])
     for spine in ax.spines.values():
         spine.set_visible(False)
-    ax.legend(
+    legend = ax.legend(
         handles,
         measures.keys(),
         loc="center",
         ncol=len(measures.keys()),
         frameon=True,
-        fontsize=10,
+        fontsize=16,
+        borderpad=0.15,
+        handletextpad=0.5,
     )
 
+    import matplotlib.patheffects as pe
+    for text in legend.get_texts():
+        text.set_path_effects([pe.withStroke(linewidth=0.2, foreground="black")])
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     plt.savefig(outfile, dpi=600, bbox_inches="tight")
     plt.show()
