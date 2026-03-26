@@ -1328,6 +1328,8 @@ def create_plot_4(
 
 
 ######################################### Experiments ##########################################
+# plt.rcParams["mathtext.fontset"] = "cm"
+# plt.rcParams["font.family"] = "serif"
 
 measures = {
     "Proxy Mutual Information TVD": ProxyMutualInformationTVD,
@@ -1387,7 +1389,7 @@ def _encode_and_clean(data_path, cols):
     return df
 
 
-def plot_legend(outfile="plots/legend_proxies.png"):
+def plot_legend(outfile="plots/legend.png"):
     """Creating a standalone legend figure for Experiment 1 with the four measures arranged in a single horizontal row,
     and save it to `outfile`.
     """
@@ -1411,14 +1413,19 @@ def plot_legend(outfile="plots/legend_proxies.png"):
     ax.set_yticks([])
     for spine in ax.spines.values():
         spine.set_visible(False)
-    ax.legend(
+    legend = ax.legend(
         handles,
         measures.keys(),
         loc="center",
         ncol=len(measures.keys()),
         frameon=True,
-        fontsize=10,
+        fontsize=16,
+        borderpad=0.15,
+        handletextpad=0.5,
     )
+    import matplotlib.patheffects as pe
+    for text in legend.get_texts():
+        text.set_path_effects([pe.withStroke(linewidth=0.2, foreground="black")])
 
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     plt.savefig(outfile, dpi=600, bbox_inches="tight")
@@ -3019,5 +3026,4 @@ if __name__ == "__main__":
     run_experiment_7()
     run_experiment_8()
     run_experiment_9()
-    run_experiment_8()
     run_experiment_10()
