@@ -1,5 +1,0 @@
-measure,kendall_tau,p_value
-MutualInformation,1.0,1.0
-ProxyMutualInformationTVD,1.0,1.0
-ProxyRepairMaxSat,-1.0,1.0
-TupleContribution,1.0,1.0

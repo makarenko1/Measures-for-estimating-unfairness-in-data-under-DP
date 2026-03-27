@@ -2635,13 +2635,16 @@ def run_experiment_8(
 def run_experiment_9(
     num_tuples: int = 100000,
     repetitions: int = 10,
-    epsilon: Optional[float] = 1.0,
+    epsilon: Optional[float] = 10.0,
     outfile_csv_summary_adult: str = "plots/experiment9_adult_summary.csv",
     outfile_csv_summary_compas: str = "plots/experiment9_compas_summary.csv",
+    outfile_excel_queries_adult: str = "plots/experiment9_adult_queries.xlsx",
+    outfile_excel_queries_compas: str = "plots/experiment9_compas_queries.xlsx",
 ):
     """
     Run Experiment 9 on the Adult and Compas datasets.
     """
+
     def _run_experiment_9_helper(
             dataset_name: str,
             criteria: list[list[str]],
@@ -2649,11 +2652,14 @@ def run_experiment_9(
             repetitions: int,
             epsilon: Optional[float],
             outfile_csv_summary: str,
+            outfile_excel_queries: str,
+            query_index_offset: int = 0,
     ):
         """
-        Compute query disparity and unfairness-measure summaries for one dataset,
-        save the results to CSV, and print the summary table.
+        Compute query disparity, unfairness-measure summaries, and grouped query
+        outputs for one dataset. Save the summary to CSV and the query outputs to Excel.
         """
+
         # ---------------- helpers ----------------
 
         def _write_csv_strict(df: pd.DataFrame, path: str) -> None:
@@ -2662,6 +2668,37 @@ def run_experiment_9(
                 os.makedirs(dir_name, exist_ok=True)
             try:
                 df.to_csv(path, index=False)
+            except PermissionError as e:
+                raise PermissionError(
+                    f"Permission denied writing '{path}'. "
+                    f"Close the file in Excel/other programs, or choose a different output path."
+                ) from e
+
+        def _write_queries_excel(query_tables: list[tuple[str, pd.DataFrame]], path: str) -> None:
+            dir_name = os.path.dirname(path)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+            try:
+                with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                    sheet_name = dataset_name[:31]
+                    startrow = 0
+                    for title, df_q in query_tables:
+                        pd.DataFrame([[title]]).to_excel(
+                            writer,
+                            sheet_name=sheet_name,
+                            startrow=startrow,
+                            startcol=0,
+                            index=False,
+                            header=False,
+                        )
+                        df_q.to_excel(
+                            writer,
+                            sheet_name=sheet_name,
+                            startrow=startrow + 1,
+                            startcol=0,
+                            index=False,
+                        )
+                        startrow += len(df_q) + 4
             except PermissionError as e:
                 raise PermissionError(
                     f"Permission denied writing '{path}'. "
@@ -2680,21 +2717,101 @@ def run_experiment_9(
                 return f"{crit[0]}, {crit[1]}"
             return f"{crit[0]}, {crit[1]} | {crit[2]}"
 
+        def _uses_median(crit: list[str]) -> bool:
+            return len(crit) == 3 and (
+                (crit[0] == "race" and crit[2] == "c_charge_degree")
+                or (crit[0] == "c_charge_degree" and crit[2] == "race")
+            )
+
+        def _agg_name(crit: list[str]) -> str:
+            return "median" if _uses_median(crit) else "average"
+
+        def _agg_short_name(crit: list[str]) -> str:
+            return "med" if _uses_median(crit) else "avg"
+
         def _query_string(crit):
             if len(crit) == 2:
                 s, y = crit
                 return f"SELECT {s}, AVG({y}) AS rate_{y} FROM {dataset_name} GROUP BY {s};"
 
             s, y, a = crit
+            inner_alias = f"{_agg_short_name(crit)}_{y}"
+            inner_agg = (
+                f"PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {y})"
+                if _uses_median(crit)
+                else f"AVG({y})"
+            )
+            outer_agg = "MEDIAN" if _uses_median(crit) else "AVG"
+
             return (
-                f"SELECT {a}, MAX(avg_y) - MIN(avg_y) AS disparity "
-                f"FROM ("
-                f"SELECT {a}, {s}, AVG({y}) AS avg_y "
+                f"SELECT {a}, {outer_agg}({inner_alias}) AS {inner_alias} "
+                f"FROM (SELECT {s}, {a}, {inner_agg} AS {inner_alias} "
                 f"FROM {dataset_name} "
-                f"GROUP BY {a}, {s}"
-                f") q "
+                f"GROUP BY {s}, {a}) t "
                 f"GROUP BY {a};"
             )
+
+        def _query_title(idx: int, crit) -> str:
+            if len(crit) == 2:
+                s, y = crit
+                return f"q_{idx}: average {y} by {s}"
+
+            s, y, a = crit
+            if _uses_median(crit):
+                return f"q_{idx}: median of group medians of {y} by {a}"
+            return f"q_{idx}: average of group averages of {y} by {a}"
+
+        def _value_column_name(crit) -> str:
+            return f"{_agg_short_name(crit)}-{crit[1]}"
+
+        def _compute_query_table(sample: pd.DataFrame, crit: list[str]) -> pd.DataFrame:
+            value_col = _value_column_name(crit)
+
+            if len(crit) == 2:
+                s_col, y_col = crit
+                out = (
+                    sample.groupby(s_col, dropna=False)[y_col]
+                    .mean()
+                    .reset_index()
+                    .rename(columns={y_col: value_col})
+                    .sort_values(by=[s_col], kind="stable")
+                    .reset_index(drop=True)
+                )
+                return out
+
+            s_col, y_col, a_col = crit
+
+            inner_group = sample.groupby([s_col, a_col], dropna=False)[y_col]
+            inner = (
+                (inner_group.median() if _uses_median(crit) else inner_group.mean())
+                .reset_index()
+                .rename(columns={y_col: value_col})
+            )
+
+            outer_group = inner.groupby(a_col, dropna=False)[value_col]
+            out = (
+                (outer_group.median() if _uses_median(crit) else outer_group.mean())
+                .reset_index()
+                .sort_values(by=[a_col], kind="stable")
+                .reset_index(drop=True)
+            )
+            return out
+
+        def _aggregate_query_tables(query_tables_by_rep: list[pd.DataFrame], crit: list[str]) -> pd.DataFrame:
+            if len(query_tables_by_rep) == 0:
+                return pd.DataFrame()
+
+            value_col = _value_column_name(crit)
+            merged = pd.concat(query_tables_by_rep, ignore_index=True)
+            group_cols = [c for c in merged.columns if c != value_col]
+
+            out = (
+                merged.groupby(group_cols, as_index=False)[value_col]
+                .mean()
+                .sort_values(by=group_cols, kind="stable")
+                .reset_index(drop=True)
+            )
+            return out
 
         def _unconditional_story_stats(sample: pd.DataFrame, s_col: str, y_col: str):
             overall_rate = float(sample[y_col].mean())
@@ -2711,7 +2828,7 @@ def run_experiment_9(
                 "query_disparity": disparity,
             }
 
-        def _conditional_story_stats(sample: pd.DataFrame, s_col: str, y_col: str, a_col: str):
+        def _conditional_story_stats(sample: pd.DataFrame, s_col: str, y_col: str, a_col: str, use_median: bool = False):
             total = len(sample)
             disparity = 0.0
             subgroup_rates = []
@@ -2720,16 +2837,16 @@ def run_experiment_9(
                 if len(grp_a) == 0:
                     continue
 
-                mean_a = float(grp_a[y_col].mean())
+                agg_a = float(grp_a[y_col].median()) if use_median else float(grp_a[y_col].mean())
                 grouped = grp_a.groupby(s_col)[y_col]
-                means = grouped.mean()
+                agg_vals = grouped.median() if use_median else grouped.mean()
                 counts = grouped.size()
                 weights = counts / counts.sum()
 
-                subgroup_rates.extend(means.tolist())
+                subgroup_rates.extend(agg_vals.tolist())
 
                 weight_a = len(grp_a) / total
-                disparity_a = float((weights * (means - mean_a).abs()).sum())
+                disparity_a = float((weights * (agg_vals - agg_a).abs()).sum())
                 disparity += weight_a * disparity_a
 
             return {
@@ -2761,10 +2878,11 @@ def run_experiment_9(
         print(f"################### Computing Queries for {dataset_name} ###################")
 
         story_rows = []
+        query_tables_per_criterion = {tuple(crit): [] for crit in criteria}
 
         for rep in range(repetitions):
             sample = get_sample(
-                df=data,
+                df=raw_df,
                 n=n,
                 fairness_criteria=criteria,
             ).copy()
@@ -2777,12 +2895,21 @@ def run_experiment_9(
                 crit_label = _criterion_label(crit)
                 query_sql = _query_string(crit)
 
+                q_table = _compute_query_table(sample, crit)
+                query_tables_per_criterion[tuple(crit)].append(q_table)
+
                 if len(crit) == 2:
                     s_col, y_col = crit
                     stats = _unconditional_story_stats(sample, s_col, y_col)
                 else:
                     s_col, y_col, a_col = crit
-                    stats = _conditional_story_stats(sample, s_col, y_col, a_col)
+                    stats = _conditional_story_stats(
+                        sample,
+                        s_col,
+                        y_col,
+                        a_col,
+                        use_median=_uses_median(crit),
+                    )
 
                 story_rows.append({
                     "criterion": crit_label,
@@ -2803,6 +2930,15 @@ def run_experiment_9(
             .sort_values("query_disparity", ascending=False, kind="stable")
             .reset_index(drop=True)
         )
+
+        # ---------------- build and save excel query tables immediately ----------------
+
+        excel_tables = []
+        for i, crit in enumerate(criteria, start=1 + query_index_offset):
+            agg_q = _aggregate_query_tables(query_tables_per_criterion[tuple(crit)], crit)
+            excel_tables.append((_query_title(i, crit), agg_q))
+
+        _write_queries_excel(excel_tables, outfile_excel_queries)
 
         # ---------------- compute unfairness measures ----------------
 
@@ -2852,7 +2988,7 @@ def run_experiment_9(
             .reset_index(drop=True)
         )
 
-        # ---------------- save ----------------
+        # ---------------- save summary ----------------
 
         _write_csv_strict(df_summary, outfile_csv_summary)
 
@@ -2874,6 +3010,7 @@ def run_experiment_9(
             repetitions: int = 10,
             epsilon: Optional[float] = 10.0,
             outfile_csv_summary: str = "plots/experiment9_adult_summary.csv",
+            outfile_excel_queries: str = "plots/experiment9_adult_queries.xlsx",
     ):
         """
         Run Experiment 9 on the Adult dataset.
@@ -2890,6 +3027,8 @@ def run_experiment_9(
             repetitions=repetitions,
             epsilon=epsilon,
             outfile_csv_summary=outfile_csv_summary,
+            outfile_excel_queries=outfile_excel_queries,
+            query_index_offset=0,
         )
 
     def run_experiment_9_compas(
@@ -2897,15 +3036,16 @@ def run_experiment_9(
             repetitions: int = 10,
             epsilon: Optional[float] = 10.0,
             outfile_csv_summary: str = "plots/experiment9_compas_summary.csv",
+            outfile_excel_queries: str = "plots/experiment9_compas_queries.xlsx",
     ):
         """
         Run Experiment 9 on the Compas dataset.
         """
         criteria = [
-            ["race", "decile_score", "age_cat"],
-            ["race", "decile_score", "c_charge_degree"],
-            ["c_charge_degree", "decile_score", "race"],
-            ["age_cat", "decile_score", "race"],
+            ["race", "decile_score", "age_cat"],          # q_3
+            ["age_cat", "decile_score", "race"],          # q_4
+            ["c_charge_degree", "decile_score", "race"],  # q_5
+            ["race", "decile_score", "c_charge_degree"],  # q_6
         ]
 
         _run_experiment_9_helper(
@@ -2915,6 +3055,8 @@ def run_experiment_9(
             repetitions=repetitions,
             epsilon=epsilon,
             outfile_csv_summary=outfile_csv_summary,
+            outfile_excel_queries=outfile_excel_queries,
+            query_index_offset=2,
         )
 
     print("\n" + "#" * 120)
@@ -2925,6 +3067,7 @@ def run_experiment_9(
         repetitions=repetitions,
         epsilon=epsilon,
         outfile_csv_summary=outfile_csv_summary_adult,
+        outfile_excel_queries=outfile_excel_queries_adult,
     )
 
     print("\n" + "#" * 120)
@@ -2935,6 +3078,7 @@ def run_experiment_9(
         repetitions=repetitions,
         epsilon=epsilon,
         outfile_csv_summary=outfile_csv_summary_compas,
+        outfile_excel_queries=outfile_excel_queries_compas,
     )
 
 
@@ -4144,19 +4288,19 @@ def run_experiment_10_measures(
 
 
 if __name__ == "__main__":
-    create_plot_0()
-    create_plot_1()
-    create_plot_2()
-    create_plot_3()
-    create_plot_4()
-    plot_legend()
-    run_experiment_1()
-    run_experiment_2()
-    run_experiment_3()
-    run_experiment_4()
-    run_experiment_5()
-    run_experiment_6()
-    run_experiment_7()
-    run_experiment_8()
+    # create_plot_0()
+    # create_plot_1()
+    # create_plot_2()
+    # create_plot_3()
+    # create_plot_4()
+    # plot_legend()
+    # run_experiment_1()
+    # run_experiment_2()
+    # run_experiment_3()
+    # run_experiment_4()
+    # run_experiment_5()
+    # run_experiment_6()
+    # run_experiment_7()
+    # run_experiment_8()
     run_experiment_9()
-    run_experiment_10()
+    # run_experiment_10()
