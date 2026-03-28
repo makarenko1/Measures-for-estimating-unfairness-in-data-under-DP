@@ -2353,283 +2353,668 @@ def run_experiment_7(
     plt.savefig(outfile, dpi=600, bbox_inches="tight")
     plt.show()
 
+
 def run_experiment_8(
-    dataset_name: str = "Adult",
-    response_col: str = "income>50K",
-    protected_col: str = "sex",
-    num_tuples: int = 100000,
-    repetitions: int = 10,
-    complexity_grid=(1, 2, 3, 4, 5),          # layers for NN, trees for RF
-    nn_epochs: int = 20,                      # fixed training epochs for NN (complexity is layers)
-    epsilon: Optional[float] = 1.0,
-    outfile: str = "plots/experiment8.png",
+    repetitions: int = 5,
+    epsilon: float = 1.0,
+    rf_complexities: tuple[int, ...] = (10, 50, 100, 200),
+    nn_complexities: tuple[int, ...] = (1, 2, 3, 4),
+    outdir: str = "plots",
 ):
     """
-    Plot model accuracy, training time, and demographic parity gap as functions of
-    model complexity for privately trained Random Forest and neural network models.
+    Experiment 8 (Adult):
+    Train models separately for two criteria and plot, for each model separately:
+      1) complexity parameter vs accuracy
+      2) complexity parameter vs training time
+      3) complexity parameter vs demographic parity gap
+
+    Criteria:
+      - [race, sex]
+      - [sex, income>50K]
+
+    Models:
+      - Random Forest: complexity = number of trees
+      - Neural Network: complexity = number of hidden layers
+
+    Important:
+      - NaN values are not dropped; they are converted into explicit categories.
     """
-    # ---- locate dataset ----
-    if dataset_name not in datasets:
-        raise ValueError(f"Unknown dataset_name='{dataset_name}'. Choose from {list(datasets.keys())}")
-    path = datasets[dataset_name]["path"]
 
+    # ------------------------------------------------------------
+    # 1. Load Adult
+    # ------------------------------------------------------------
+    path = datasets["Adult"]["path"]
     raw_df = pd.read_csv(path)
-    data = _encode_and_clean(path, raw_df.columns)
+    data = _encode_and_clean(path, list(raw_df.columns))
 
-    # ---- validate columns ----
-    required = [response_col, protected_col]
-    missing = [c for c in required if c not in data.columns]
+    criteria_configs = [
+        {
+            "criterion": ("race", "sex"),
+            "target_col": "sex",
+            "protected_col": "race",
+            "label": "[race, sex]",
+        },
+        {
+            "criterion": ("sex", "income>50K"),
+            "target_col": "income>50K",
+            "protected_col": "sex",
+            "label": "[sex, income>50K]",
+        },
+    ]
+
+    required_cols = sorted(
+        set(c for cfg in criteria_configs for c in (cfg["target_col"], cfg["protected_col"]))
+    )
+    missing = [c for c in required_cols if c not in data.columns]
     if missing:
-        raise ValueError(f"Missing columns {missing}. Available columns: {list(data.columns)}")
+        raise ValueError(f"Missing columns {missing}")
 
-    n = min(num_tuples, len(data))
-    if n < 50:
-        raise ValueError(f"Too few rows after cleaning (n={n}). Increase num_tuples.")
+    # ------------------------------------------------------------
+    # 2. Keep NaNs and categorize them
+    # ------------------------------------------------------------
+    data = data.copy()
+    for c in data.columns:
+        if pd.api.types.is_numeric_dtype(data[c]):
+            data[c] = data[c].fillna(-1)
+        else:
+            data[c] = data[c].astype("object").fillna("Missing")
 
-    # ---- helpers ----
-    def _dp_gap(y_pred_bin: np.ndarray, s: np.ndarray) -> float:
-        """Demographic parity gap: max_g P(ŷ=1|S=g) - min_g P(ŷ=1|S=g)."""
-        df_eval = pd.DataFrame({"yhat": y_pred_bin.astype(float), "s": s})
-        rates = df_eval.groupby("s")["yhat"].mean()
-        return float(rates.max() - rates.min()) if len(rates) else 0.0
+    if len(data) < 100:
+        raise ValueError(f"Too few rows after preprocessing (n={len(data)}).")
+
+    # ------------------------------------------------------------
+    # 3. Helpers
+    # ------------------------------------------------------------
+    def _dp_gap(y_pred: np.ndarray, protected_values: np.ndarray) -> float:
+        if len(y_pred) == 0:
+            return np.nan
+        pos = (y_pred == 1).astype(float)
+        rates = pd.Series(pos).groupby(pd.Series(protected_values)).mean()
+        return float(rates.max() - rates.min()) if len(rates) else np.nan
+
+    def _prepare_split(target_col: str):
+        """
+        Use full dataset and all features except the target.
+        """
+        df = data.copy()
+
+        feature_cols = [c for c in df.columns if c != target_col]
+        X = df[feature_cols].to_numpy(dtype=float)
+        y_raw = df[target_col].to_numpy()
+
+        le = LabelEncoder()
+        y = le.fit_transform(y_raw).astype(np.int64)
+
+        if len(np.unique(y)) < 2:
+            return None
+
+        X = MinMaxScaler().fit_transform(X)
+        strat = y if len(np.unique(y)) > 1 else None
+
+        X_train, X_test, y_train, y_test, idx_train, idx_test = train_test_split(
+            X,
+            y,
+            np.arange(len(df)),
+            test_size=0.2,
+            stratify=strat,
+        )
+
+        test_df = df.iloc[idx_test].reset_index(drop=True)
+        return X_train, X_test, y_train, y_test, test_df
 
     def _init_stats():
         return {"mean": [], "min": [], "max": []}
 
     def _push_stats(stats, arr):
         arr = np.asarray(arr, dtype=float)
-        stats["mean"].append(float(np.mean(arr)))
-        stats["min"].append(float(np.min(arr)))
-        stats["max"].append(float(np.max(arr)))
+        arr = arr[~np.isnan(arr)]
+        if arr.size == 0:
+            stats["mean"].append(np.nan)
+            stats["min"].append(np.nan)
+            stats["max"].append(np.nan)
+        else:
+            stats["mean"].append(float(np.mean(arr)))
+            stats["min"].append(float(np.min(arr)))
+            stats["max"].append(float(np.max(arr)))
 
-    # ---- stats per model per metric ----
-    rf_acc_stats, rf_time_stats, rf_dp_stats = _init_stats(), _init_stats(), _init_stats()
-    nn_acc_stats, nn_time_stats, nn_dp_stats = _init_stats(), _init_stats(), _init_stats()
+    def _train_and_eval_rf(
+        X_train, X_test, y_train, y_test, test_df, protected_col: str,
+        n_estimators: int,
+    ):
+        classes = sorted(np.unique(y_train).tolist())
 
-    for k in complexity_grid:
-        rf_acc_rep, rf_time_rep, rf_dp_rep = [], [], []
-        nn_acc_rep, nn_time_rep, nn_dp_rep = [], [], []
+        start_train = time.perf_counter()
+        clf = RandomForestClassifier(
+            n_estimators=int(n_estimators),
+            max_depth=15,
+            shuffle=True,
+            classes=classes,
+            epsilon=float(epsilon),
+        )
+        clf.fit(X_train, y_train)
+        train_time = time.perf_counter() - start_train
 
-        for _ in range(repetitions):
-            sample = get_sample(
-                df=data,
-                n=n,
-                fairness_criteria=datasets[dataset_name]["criteria"],
-            ).copy()
+        y_pred = clf.predict(X_test)
+        acc = accuracy_score(y_test, y_pred)
+        dp = _dp_gap(y_pred, test_df[protected_col].to_numpy())
 
-            # features / labels / protected
-            feature_cols = [c for c in sample.columns if c != response_col]
-            if not feature_cols:
-                raise ValueError("No feature columns available (all columns equal response_col).")
+        return train_time, acc, dp
 
-            X = sample[feature_cols].to_numpy(dtype=float)
-            y_raw = sample[response_col].to_numpy()
-            s = sample[protected_col].to_numpy()
+    def _train_and_eval_nn(
+        X_train, X_test, y_train, y_test, test_df, protected_col: str,
+        n_layers: int,
+    ):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-            le = LabelEncoder()
-            y = le.fit_transform(y_raw).astype(np.int64)
-            if len(np.unique(y)) < 2:
-                # if degenerate label in this sample, skip this repetition
-                continue
+        X_train_t = torch.tensor(X_train, dtype=torch.float32)
+        y_train_t = torch.tensor(y_train, dtype=torch.long)
+        X_test_t = torch.tensor(X_test, dtype=torch.float32).to(device)
 
-            X = MinMaxScaler().fit_transform(X)
+        train_ds = TensorDataset(X_train_t, y_train_t)
+        batch_size = min(256, len(train_ds))
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 
-            strat = y if len(np.unique(y)) > 1 else None
-            X_train, X_test, y_train, y_test, s_train, s_test = train_test_split(
-                X, y, s, test_size=0.2, stratify=strat
-            )
+        input_dim = X_train.shape[1]
+        num_classes = int(len(np.unique(y_train)))
+        epochs = 80
 
-            # =======================
-            # ===== Random Forest ===
-            # =======================
-            start = time.perf_counter()
-            rf = RandomForestClassifier(
-                n_estimators=int(k),
-                max_depth=15,
-                shuffle=True,
-                classes=[0, 1],
-                epsilon=epsilon,
-            )
-            rf.fit(X_train, y_train)
-            rf_time = time.perf_counter() - start
-
-            rf_pred = rf.predict(X_test)
-            rf_acc = accuracy_score(y_test, rf_pred)
-            rf_dp = _dp_gap((rf_pred == 1).astype(int), s_test)
-
-            rf_time_rep.append(rf_time)
-            rf_acc_rep.append(rf_acc)
-            rf_dp_rep.append(rf_dp)
-
-            # =======================
-            # ===== Neural Network ==
-            # =======================
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-            X_train_t = torch.tensor(X_train, dtype=torch.float32)
-            y_train_t = torch.tensor(y_train, dtype=torch.long)
-            X_test_t = torch.tensor(X_test, dtype=torch.float32).to(device)
-
-            train_ds = TensorDataset(X_train_t, y_train_t)
-            batch_size = min(256, len(train_ds))
-            train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-
-            num_classes = int(len(np.unique(y)))
-
-            class LayerNN(nn.Module):
-                def __init__(self, d_in: int, n_layers: int, d_hidden: int = 64, n_out: int = 2):
-                    super().__init__()
-                    layers = []
-                    # first hidden
-                    layers.append(nn.Linear(d_in, d_hidden))
+        class DeepNN(nn.Module):
+            def __init__(self, d_in: int, n_layers: int, n_out: int, hidden_dim: int = 64):
+                super().__init__()
+                layers = [nn.Linear(d_in, hidden_dim), nn.ReLU()]
+                for _ in range(max(0, n_layers - 1)):
+                    layers.append(nn.Linear(hidden_dim, hidden_dim))
                     layers.append(nn.ReLU())
-                    # additional hidden layers
-                    for _ in range(max(0, n_layers - 1)):
-                        layers.append(nn.Linear(d_hidden, d_hidden))
-                        layers.append(nn.ReLU())
-                    # output
-                    layers.append(nn.Linear(d_hidden, n_out))
-                    self.net = nn.Sequential(*layers)
+                layers.append(nn.Linear(hidden_dim, n_out))
+                self.net = nn.Sequential(*layers)
 
-                def forward(self, x):
-                    return self.net(x)
+            def forward(self, x):
+                return self.net(x)
 
-            model = LayerNN(d_in=X_train.shape[1], n_layers=int(k), d_hidden=64, n_out=num_classes).to(device)
-            criterion = nn.CrossEntropyLoss()
-            optimizer = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9)
+        model = DeepNN(input_dim, int(n_layers), num_classes).to(device)
+        criterion_loss = nn.CrossEntropyLoss()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9)
 
-            if epsilon is not None:
-                privacy_engine = PrivacyEngine()
-                model, optimizer, train_loader = privacy_engine.make_private_with_epsilon(
-                    module=model,
-                    optimizer=optimizer,
-                    data_loader=train_loader,
-                    target_epsilon=float(epsilon),
-                    target_delta=1e-5,
-                    epochs=int(nn_epochs),
-                    max_grad_norm=1.0,
-                )
-
-            start = time.perf_counter()
-            model.train()
-            for _ep in range(int(nn_epochs)):
-                for xb, yb in train_loader:
-                    xb, yb = xb.to(device), yb.to(device)
-                    optimizer.zero_grad()
-                    loss = criterion(model(xb), yb)
-                    loss.backward()
-                    optimizer.step()
-            nn_time = time.perf_counter() - start
-
-            model.eval()
-            with torch.no_grad():
-                nn_logits = model(X_test_t)
-                nn_pred = torch.argmax(nn_logits, dim=1).cpu().numpy()
-
-            nn_acc = accuracy_score(y_test, nn_pred)
-            nn_dp = _dp_gap((nn_pred == 1).astype(int), s_test)
-
-            nn_time_rep.append(nn_time)
-            nn_acc_rep.append(nn_acc)
-            nn_dp_rep.append(nn_dp)
-
-        # aggregate
-        if len(rf_acc_rep) == 0 or len(nn_acc_rep) == 0:
-            print(f"k={k}: skipped (degenerate labels or empty reps).")
-            _push_stats(rf_acc_stats, [np.nan]); _push_stats(rf_time_stats, [np.nan]); _push_stats(rf_dp_stats, [np.nan])
-            _push_stats(nn_acc_stats, [np.nan]); _push_stats(nn_time_stats, [np.nan]); _push_stats(nn_dp_stats, [np.nan])
-            continue
-
-        _push_stats(rf_acc_stats, rf_acc_rep)
-        _push_stats(rf_time_stats, rf_time_rep)
-        _push_stats(rf_dp_stats, rf_dp_rep)
-
-        _push_stats(nn_acc_stats, nn_acc_rep)
-        _push_stats(nn_time_stats, nn_time_rep)
-        _push_stats(nn_dp_stats, nn_dp_rep)
-
-        print(
-            f"k={k} | "
-            f"RF acc={np.mean(rf_acc_rep):.4f}, time={np.mean(rf_time_rep):.2f}s, dp={np.mean(rf_dp_rep):.3f} | "
-            f"NN acc={np.mean(nn_acc_rep):.4f}, time={np.mean(nn_time_rep):.2f}s, dp={np.mean(nn_dp_rep):.3f}"
+        privacy_engine = PrivacyEngine()
+        model, optimizer, train_loader = privacy_engine.make_private_with_epsilon(
+            module=model,
+            optimizer=optimizer,
+            data_loader=train_loader,
+            target_epsilon=float(epsilon),
+            target_delta=1e-5,
+            epochs=epochs,
+            max_grad_norm=1.0,
         )
 
-    # ---- plotting ----
-    plt.rcParams.update({
-        "axes.titlesize": 20,
-        "axes.labelsize": 24,
-        "xtick.labelsize": 18,
-        "ytick.labelsize": 18,
-    })
+        start_train = time.perf_counter()
+        model.train()
+        for _ in range(epochs):
+            for xb, yb in train_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                optimizer.zero_grad()
+                logits = model(xb)
+                loss = criterion_loss(logits, yb)
+                loss.backward()
+                optimizer.step()
+        train_time = time.perf_counter() - start_train
 
-    x = np.asarray(complexity_grid, dtype=float)
+        model.eval()
+        with torch.no_grad():
+            logits_test = model(X_test_t)
+            y_pred = torch.argmax(logits_test, dim=1).cpu().numpy()
 
-    base, ext = os.path.splitext(outfile)
-    out_acc  = f"{base}_acc.png"
-    out_time = f"{base}_time.png"
-    out_dp   = f"{base}_dp.png"
+        acc = accuracy_score(y_test, y_pred)
+        dp = _dp_gap(y_pred, test_df[protected_col].to_numpy())
 
-    os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
+        return train_time, acc, dp
 
-    def _plot_one(y_rf, y_rf_min, y_rf_max, y_nn, y_nn_min, y_nn_max, ylabel, title, outpath):
+    def _plot_line(x, stats, xlabel, ylabel, title, outfile, color):
         fig, ax = plt.subplots(figsize=(8, 5))
 
-        # RF (purple)
-        ax.plot(x, y_rf, marker="o", linewidth=2, color="purple", label="Random Forest")
-        ax.fill_between(x, y_rf_min, y_rf_max, alpha=0.2, color="purple")
+        y_mean = np.asarray(stats["mean"], dtype=float)
+        y_min = np.asarray(stats["min"], dtype=float)
+        y_max = np.asarray(stats["max"], dtype=float)
+        x = np.asarray(x, dtype=float)
 
-        # NN (grey)
-        ax.plot(x, y_nn, marker="o", linewidth=2, color="grey", label="Neural Network")
-        ax.fill_between(x, y_nn_min, y_nn_max, alpha=0.2, color="grey")
+        ax.plot(x, y_mean, marker="o", linewidth=2, color=color)
+        mask = ~np.isnan(x) & ~np.isnan(y_mean) & ~np.isnan(y_min) & ~np.isnan(y_max)
+        if mask.any():
+            ax.fill_between(
+                x[mask],
+                y_min[mask],
+                y_max[mask],
+                alpha=0.2,
+                color=color,
+                linewidth=0,
+            )
 
-        ax.set_xlabel("complexity (trees for RF / layers for NN)")
+        ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.set_title(title)
         ax.grid(True, linestyle="--", alpha=0.4)
-        ax.legend(fontsize=16)
 
+        os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
         plt.tight_layout()
-        plt.savefig(outpath, dpi=600, bbox_inches="tight")
+        plt.savefig(outfile, dpi=600, bbox_inches="tight")
         plt.show()
 
-    # 1) Accuracy
-    _plot_one(
-        np.asarray(rf_acc_stats["mean"]),
-        np.asarray(rf_acc_stats["min"]),
-        np.asarray(rf_acc_stats["max"]),
-        np.asarray(nn_acc_stats["mean"]),
-        np.asarray(nn_acc_stats["min"]),
-        np.asarray(nn_acc_stats["max"]),
-        ylabel="test accuracy",
-        title=f"Accuracy vs Complexity ({dataset_name}, ε={epsilon})",
-        outpath=out_acc,
+    def _safe_label(label: str) -> str:
+        return (
+            label.replace("[", "")
+            .replace("]", "")
+            .replace(",", "")
+            .replace(" ", "_")
+            .replace(">", "gt")
+            .replace("<", "lt")
+        )
+
+    def _run_for_criterion(cfg: dict):
+        criterion = cfg["criterion"]
+        target_col = cfg["target_col"]
+        protected_col = cfg["protected_col"]
+        label = cfg["label"]
+        safe_label = _safe_label(label)
+
+        rf_acc_out = os.path.join(outdir, f"experiment10_rf_accuracy_{safe_label}.png")
+        rf_time_out = os.path.join(outdir, f"experiment10_rf_time_{safe_label}.png")
+        rf_dp_out = os.path.join(outdir, f"experiment10_rf_dp_{safe_label}.png")
+
+        nn_acc_out = os.path.join(outdir, f"experiment10_nn_accuracy_{safe_label}.png")
+        nn_time_out = os.path.join(outdir, f"experiment10_nn_time_{safe_label}.png")
+        nn_dp_out = os.path.join(outdir, f"experiment10_nn_dp_{safe_label}.png")
+
+        print("\n" + "=" * 120)
+        print(f"RUNNING EXPERIMENT 10 FOR CRITERION {label}")
+        print("=" * 120)
+
+        # ------------------------------------------------------------
+        # Random Forest: trees vs accuracy/time/dp
+        # ------------------------------------------------------------
+        rf_acc_stats = _init_stats()
+        rf_time_stats = _init_stats()
+        rf_dp_stats = _init_stats()
+
+        for n_trees in rf_complexities:
+            acc_rep = []
+            time_rep = []
+            dp_rep = []
+
+            for rep in range(repetitions):
+                prepared = _prepare_split(target_col)
+                if prepared is None:
+                    print(f"[{label}][RF trees={n_trees}] rep={rep+1}/{repetitions}: skipped")
+                    continue
+
+                X_train, X_test, y_train, y_test, test_df = prepared
+                train_time, acc, dp = _train_and_eval_rf(
+                    X_train, X_test, y_train, y_test, test_df, protected_col,
+                    n_estimators=n_trees,
+                )
+
+                acc_rep.append(acc)
+                time_rep.append(train_time)
+                dp_rep.append(dp)
+
+                print(
+                    f"[{label}][RF trees={n_trees}] rep={rep+1}/{repetitions}: "
+                    f"time={train_time:.3f}s acc={acc:.4f} dp={dp:.4f}"
+                )
+
+            _push_stats(rf_acc_stats, acc_rep)
+            _push_stats(rf_time_stats, time_rep)
+            _push_stats(rf_dp_stats, dp_rep)
+
+        # ------------------------------------------------------------
+        # Neural Network: layers vs accuracy/time/dp
+        # ------------------------------------------------------------
+        nn_acc_stats = _init_stats()
+        nn_time_stats = _init_stats()
+        nn_dp_stats = _init_stats()
+
+        for n_layers in nn_complexities:
+            acc_rep = []
+            time_rep = []
+            dp_rep = []
+
+            for rep in range(repetitions):
+                prepared = _prepare_split(target_col)
+                if prepared is None:
+                    print(f"[{label}][NN layers={n_layers}] rep={rep+1}/{repetitions}: skipped")
+                    continue
+
+                X_train, X_test, y_train, y_test, test_df = prepared
+                train_time, acc, dp = _train_and_eval_nn(
+                    X_train, X_test, y_train, y_test, test_df, protected_col,
+                    n_layers=n_layers,
+                )
+
+                acc_rep.append(acc)
+                time_rep.append(train_time)
+                dp_rep.append(dp)
+
+                print(
+                    f"[{label}][NN layers={n_layers}] rep={rep+1}/{repetitions}: "
+                    f"time={train_time:.3f}s acc={acc:.4f} dp={dp:.4f}"
+                )
+
+            _push_stats(nn_acc_stats, acc_rep)
+            _push_stats(nn_time_stats, time_rep)
+            _push_stats(nn_dp_stats, dp_rep)
+
+        # round training-time stats to 3 decimals
+        for stats in (rf_time_stats, nn_time_stats):
+            stats["mean"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["mean"]]
+            stats["min"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["min"]]
+            stats["max"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["max"]]
+
+        print(f"\nSummary for criterion {label}")
+        print("Random Forest")
+        for i, n_trees in enumerate(rf_complexities):
+            print(
+                f"  trees={n_trees}: "
+                f"acc={rf_acc_stats['mean'][i]:.4f} "
+                f"time={rf_time_stats['mean'][i]:.3f}s "
+                f"dp={rf_dp_stats['mean'][i]:.4f}"
+            )
+
+        print("Neural Network")
+        for i, n_layers in enumerate(nn_complexities):
+            print(
+                f"  layers={n_layers}: "
+                f"acc={nn_acc_stats['mean'][i]:.4f} "
+                f"time={nn_time_stats['mean'][i]:.3f}s "
+                f"dp={nn_dp_stats['mean'][i]:.4f}"
+            )
+
+        # ------------------------------------------------------------
+        # Plot
+        # ------------------------------------------------------------
+        plt.rcParams.update({
+            "axes.titlesize": 18,
+            "axes.labelsize": 22,
+            "xtick.labelsize": 14,
+            "ytick.labelsize": 14,
+        })
+
+        # RF plots
+        _plot_line(
+            x=rf_complexities,
+            stats=rf_acc_stats,
+            xlabel="number of trees",
+            ylabel="accuracy",
+            title=f"Random Forest: trees vs accuracy for {label} (ε={epsilon})",
+            outfile=rf_acc_out,
+            color="violet",
+        )
+        _plot_line(
+            x=rf_complexities,
+            stats=rf_time_stats,
+            xlabel="number of trees",
+            ylabel="training time (s)",
+            title=f"Random Forest: trees vs training time for {label} (ε={epsilon})",
+            outfile=rf_time_out,
+            color="violet",
+        )
+        _plot_line(
+            x=rf_complexities,
+            stats=rf_dp_stats,
+            xlabel="number of trees",
+            ylabel="demographic parity gap",
+            title=f"Random Forest: trees vs DP gap for {label} (ε={epsilon})",
+            outfile=rf_dp_out,
+            color="violet",
+        )
+
+        # NN plots
+        _plot_line(
+            x=nn_complexities,
+            stats=nn_acc_stats,
+            xlabel="number of hidden layers",
+            ylabel="accuracy",
+            title=f"Neural Network: layers vs accuracy for {label} (ε={epsilon})",
+            outfile=nn_acc_out,
+            color="grey",
+        )
+        _plot_line(
+            x=nn_complexities,
+            stats=nn_time_stats,
+            xlabel="number of hidden layers",
+            ylabel="training time (s)",
+            title=f"Neural Network: layers vs training time for {label} (ε={epsilon})",
+            outfile=nn_time_out,
+            color="grey",
+        )
+        _plot_line(
+            x=nn_complexities,
+            stats=nn_dp_stats,
+            xlabel="number of hidden layers",
+            ylabel="demographic parity gap",
+            title=f"Neural Network: layers vs DP gap for {label} (ε={epsilon})",
+            outfile=nn_dp_out,
+            color="grey",
+        )
+
+    # ------------------------------------------------------------
+    # 4. Run separately for each criterion
+    # ------------------------------------------------------------
+    for cfg in criteria_configs:
+        _run_for_criterion(cfg)
+
+
+def run_experiment_8_measures(
+    repetitions: int = 5,
+    epsilon: float = 1.0,
+    num_tuples: int | None = None,
+    outfile_tvd: str = "plots/experiment10_tvd.png",
+    outfile_repair: str = "plots/experiment10_repair.png",
+    outfile_tc: str = "plots/experiment10_tc.png",
+):
+    """
+    Plot unfairness-measure values for two Adult fairness criteria, using the same
+    sampled data in each repetition for all measures and both criteria.
+    """
+
+    # ------------------------------------------------------------
+    # 1. Load Adult
+    # ------------------------------------------------------------
+    path = datasets["Adult"]["path"]
+    raw_df = pd.read_csv(path)
+    data = _encode_and_clean(path, list(raw_df.columns))
+
+    criteria = [
+        ["sex", "income>50K"],
+        ["sex", "income>50K", "hours-per-week"],
+    ]
+
+    required_cols = sorted(set(c for crit in criteria for c in crit))
+    missing = [c for c in required_cols if c not in data.columns]
+    if missing:
+        raise ValueError(f"Missing columns {missing}")
+
+    # ------------------------------------------------------------
+    # 2. Keep NaNs and categorize them
+    # ------------------------------------------------------------
+    data = data.copy()
+    for c in data.columns:
+        if pd.api.types.is_numeric_dtype(data[c]):
+            data[c] = data[c].fillna(-1)
+        else:
+            data[c] = data[c].astype("object").fillna("Missing")
+
+    if len(data) < 100:
+        raise ValueError(f"Too few rows after preprocessing (n={len(data)}).")
+
+    n = len(data) if num_tuples is None else min(num_tuples, len(data))
+
+    # ------------------------------------------------------------
+    # 3. Helpers
+    # ------------------------------------------------------------
+    def _densify_columns(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        for c in out.columns:
+            codes, _ = pd.factorize(out[c], sort=False)
+            out[c] = codes.astype(np.int64)
+        return out
+
+    def _criterion_label(criterion: list[str]) -> str:
+        if len(criterion) == 2:
+            return f"{criterion[0]} ⟂ {criterion[1]}"
+        return f"{criterion[0]} ⟂ {criterion[1]} | {criterion[2]}"
+
+    def _init_stats():
+        return {"mean": [], "min": [], "max": []}
+
+    def _push_stats(stats, arr):
+        arr = np.asarray(arr, dtype=float)
+        arr = arr[~np.isnan(arr)]
+        if arr.size == 0:
+            stats["mean"].append(np.nan)
+            stats["min"].append(np.nan)
+            stats["max"].append(np.nan)
+        else:
+            stats["mean"].append(float(np.mean(arr)))
+            stats["min"].append(float(np.min(arr)))
+            stats["max"].append(float(np.max(arr)))
+
+    def _plot_line(x, stats, xticklabels, xlabel, ylabel, title, outfile, color):
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        y_mean = np.asarray(stats["mean"], dtype=float)
+        y_min = np.asarray(stats["min"], dtype=float)
+        y_max = np.asarray(stats["max"], dtype=float)
+        x = np.asarray(x, dtype=float)
+
+        ax.plot(x, y_mean, marker="o", linewidth=2, color=color)
+        mask = ~np.isnan(x) & ~np.isnan(y_mean) & ~np.isnan(y_min) & ~np.isnan(y_max)
+        if mask.any():
+            ax.fill_between(
+                x[mask],
+                y_min[mask],
+                y_max[mask],
+                alpha=0.2,
+                color=color,
+                linewidth=0,
+            )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(xticklabels)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True, linestyle="--", alpha=0.4)
+
+        os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
+        plt.tight_layout()
+        plt.savefig(outfile, dpi=600, bbox_inches="tight")
+        plt.show()
+
+    # ------------------------------------------------------------
+    # 4. Storage: one list per criterion per measure
+    # ------------------------------------------------------------
+    tvd_per_criterion = [[] for _ in criteria]
+    repair_per_criterion = [[] for _ in criteria]
+    tc_per_criterion = [[] for _ in criteria]
+
+    # ------------------------------------------------------------
+    # 5. Run measures on the SAME sample per repetition
+    # ------------------------------------------------------------
+    for rep in range(repetitions):
+        sample = get_sample(
+            df=data,
+            n=n,
+            fairness_criteria=criteria,
+            mode="cap",
+        ).copy()
+
+        print(f"\n=== Repetition {rep+1}/{repetitions} ===")
+
+        for i, criterion in enumerate(criteria):
+            sub = _densify_columns(sample[criterion].copy())
+
+            tvd_val = ProxyMutualInformationTVD(data=sub).calculate([criterion], epsilon=epsilon)
+            repair_val = ProxyRepairMaxSat(data=sub).calculate([criterion], epsilon=epsilon)
+            tc_val = TupleContribution(data=sub).calculate([criterion], epsilon=epsilon)
+
+            tvd_per_criterion[i].append(float(tvd_val))
+            repair_per_criterion[i].append(float(repair_val))
+            tc_per_criterion[i].append(float(tc_val))
+
+            print(
+                f"[criterion={criterion}] rep={rep+1}/{repetitions}: "
+                f"tvd={float(tvd_val):.6f} "
+                f"repair={float(repair_val):.6f} "
+                f"tc={float(tc_val):.6f}"
+            )
+
+    # ------------------------------------------------------------
+    # 6. Aggregate stats
+    # ------------------------------------------------------------
+    tvd_stats = _init_stats()
+    repair_stats = _init_stats()
+    tc_stats = _init_stats()
+
+    for i in range(len(criteria)):
+        _push_stats(tvd_stats, tvd_per_criterion[i])
+        _push_stats(repair_stats, repair_per_criterion[i])
+        _push_stats(tc_stats, tc_per_criterion[i])
+
+    # ------------------------------------------------------------
+    # 7. Plot
+    # ------------------------------------------------------------
+    plt.rcParams.update({
+        "axes.titlesize": 18,
+        "axes.labelsize": 22,
+        "xtick.labelsize": 14,
+        "ytick.labelsize": 14,
+    })
+
+    x = np.arange(1, len(criteria) + 1)
+    xticklabels = [str(i) for i in x]
+
+    _plot_line(
+        x=x,
+        stats=tvd_stats,
+        xticklabels=xticklabels,
+        xlabel="criterion",
+        ylabel="measure value",
+        title=f"{r'$\mutualproxytvd$'} on Adult (ε={epsilon})",
+        outfile=outfile_tvd,
+        color="tab:blue",
     )
 
-    # 2) Training time
-    _plot_one(
-        np.asarray(rf_time_stats["mean"]),
-        np.asarray(rf_time_stats["min"]),
-        np.asarray(rf_time_stats["max"]),
-        np.asarray(nn_time_stats["mean"]),
-        np.asarray(nn_time_stats["min"]),
-        np.asarray(nn_time_stats["max"]),
-        ylabel="training time (s)",
-        title=f"Training Time vs Complexity ({dataset_name}, ε={epsilon})",
-        outpath=out_time,
+    _plot_line(
+        x=x,
+        stats=repair_stats,
+        xticklabels=xticklabels,
+        xlabel="criterion",
+        ylabel="measure value",
+        title=f"{r'$\repairsat$'} on Adult (ε={epsilon})",
+        outfile=outfile_repair,
+        color="tab:orange",
     )
 
-    # 3) Demographic parity gap
-    _plot_one(
-        np.asarray(rf_dp_stats["mean"]),
-        np.asarray(rf_dp_stats["min"]),
-        np.asarray(rf_dp_stats["max"]),
-        np.asarray(nn_dp_stats["mean"]),
-        np.asarray(nn_dp_stats["min"]),
-        np.asarray(nn_dp_stats["max"]),
-        ylabel="Demographic Parity gap",
-        title=f"DP Gap vs Complexity ({dataset_name}, ε={epsilon})",
-        outpath=out_dp,
+    _plot_line(
+        x=x,
+        stats=tc_stats,
+        xticklabels=xticklabels,
+        xlabel="criterion",
+        ylabel="measure value",
+        title=f"{r'$\contribution$'} on Adult (ε={epsilon})",
+        outfile=outfile_tc,
+        color="tab:green",
     )
+
+    # ------------------------------------------------------------
+    # 8. Print summary
+    # ------------------------------------------------------------
+    print("\n=== Summary ===")
+    for i, criterion in enumerate(criteria):
+        print(
+            f"Criterion {i+1} ({_criterion_label(criterion)}): "
+            f"TVD={tvd_stats['mean'][i]:.6f}, "
+            f"Repair={repair_stats['mean'][i]:.6f}, "
+            f"TC={tc_stats['mean'][i]:.6f}"
+        )
 
 
 def run_experiment_9(
@@ -3082,1225 +3467,197 @@ def run_experiment_9(
     )
 
 
-# def run_experiment_10(
-#     step: float = 0.1,
-#     n_per_sex: int = 100000,
-#     repetitions: int = 10,
-#     outfile: str = "plots/experiment10.png",
-# ):
-#     """
-#     Plot model accuracy, training time, demographic parity gap, and conditional
-#     statistical parity gap as functions of model complexity on the Adult dataset.
-#     """
-#
-#     # --- helpers -------------------------------------------------
-#     def _make_dataset(t: float) -> pd.DataFrame:
-#         """
-#         Create synthetic dataset for a given unfairness level t in [0,1].
-#         sex: 1=male, 0=female
-#         income: 1=income>50K, 0=otherwise
-#         """
-#         n = int(n_per_sex)
-#
-#         # Base fair allocation:
-#         m0 = n // 2
-#         m1 = n - m0
-#         f0 = n // 2
-#         f1 = n - f0
-#
-#         flip_m = int(round(t * m0))  # male: 0 -> 1
-#         flip_f = int(round(t * f1))  # female: 1 -> 0
-#
-#         m0_new = m0 - flip_m
-#         m1_new = m1 + flip_m
-#         f1_new = f1 - flip_f
-#         f0_new = f0 + flip_f
-#
-#         sex = np.concatenate([
-#             np.ones(m0_new + m1_new, dtype=int),   # males = 1
-#             np.zeros(f0_new + f1_new, dtype=int),  # females = 0
-#         ])
-#         income = np.concatenate([
-#             np.concatenate([np.zeros(m0_new, dtype=int), np.ones(m1_new, dtype=int)]),
-#             np.concatenate([np.zeros(f0_new, dtype=int), np.ones(f1_new, dtype=int)]),
-#         ])
-#
-#         df = pd.DataFrame({"sex": sex, "income>50K": income})
-#         df = df.sample(frac=1.0, replace=False).reset_index(drop=True)
-#         return df
-#
-#     def _dp_gap(df: pd.DataFrame) -> float:
-#         rates = df.groupby("sex")["income>50K"].mean()
-#         return float(abs(rates.max() - rates.min())) if len(rates) else 0.0
-#
-#     # --- grid ----------------------------------------------------
-#     ts = [round(i * step, 10) for i in range(int(1 / step) + 1)]
-#     criterion = ["sex", "income>50K"]
-#
-#     # store per-t stats
-#     mi_stats = {"mean": [], "min": [], "max": []}
-#     tvd_stats = {"mean": [], "min": [], "max": []}
-#     dp_stats = {"mean": [], "min": [], "max": []}
-#
-#     # --- run -----------------------------------------------------
-#     for t in ts:
-#         mi_rep = []
-#         tvd_rep = []
-#         dp_rep = []
-#
-#         for _ in range(repetitions):
-#             df = _make_dataset(t)
-#
-#             # NO NOISE: epsilon=None
-#             mi_val = MutualInformation(data=df[criterion].copy()).calculate([criterion], epsilon=None)
-#             tvd_val = ProxyMutualInformationTVD(data=df[criterion].copy()).calculate([criterion], epsilon=None)
-#
-#             mi_rep.append(float(mi_val))
-#             tvd_rep.append(float(tvd_val))
-#             dp_rep.append(_dp_gap(df))
-#
-#         mi_arr = np.asarray(mi_rep, dtype=float)
-#         tvd_arr = np.asarray(tvd_rep, dtype=float)
-#         dp_arr = np.asarray(dp_rep, dtype=float)
-#
-#         mi_stats["mean"].append(float(np.nanmean(mi_arr)))
-#         mi_stats["min"].append(float(np.nanmin(mi_arr)))
-#         mi_stats["max"].append(float(np.nanmax(mi_arr)))
-#
-#         tvd_stats["mean"].append(float(np.nanmean(tvd_arr)))
-#         tvd_stats["min"].append(float(np.nanmin(tvd_arr)))
-#         tvd_stats["max"].append(float(np.nanmax(tvd_arr)))
-#
-#         dp_stats["mean"].append(float(np.nanmean(dp_arr)))
-#         dp_stats["min"].append(float(np.nanmin(dp_arr)))
-#         dp_stats["max"].append(float(np.nanmax(dp_arr)))
-#
-#         print(
-#             f"t={t:.1f}  DP-gap≈{dp_stats['mean'][-1]:.3f}  "
-#             f"MI≈{mi_stats['mean'][-1]:.6f}  TVD≈{tvd_stats['mean'][-1]:.6f}"
-#         )
-#
-#     # --- plot ----------------------------------------------------
-#     plt.rcParams.update({
-#         "axes.titlesize": 20,
-#         "axes.labelsize": 30,
-#         "xtick.labelsize": 18,
-#         "ytick.labelsize": 18,
-#     })
-#
-#     fig, ax = plt.subplots(figsize=(8, 4))
-#
-#     x = np.asarray(dp_stats["mean"], dtype=float)
-#
-#     # MI line + shadow
-#     mi_mean = np.asarray(mi_stats["mean"], dtype=float)
-#     mi_min  = np.asarray(mi_stats["min"], dtype=float)
-#     mi_max  = np.asarray(mi_stats["max"], dtype=float)
-#
-#     line_mi, = ax.plot(x, mi_mean, marker="o", linewidth=2, label="MutualInformation (no noise)")
-#     mask_mi = ~np.isnan(x) & ~np.isnan(mi_min) & ~np.isnan(mi_max)
-#     if mask_mi.any():
-#         ax.fill_between(
-#             x[mask_mi], mi_min[mask_mi], mi_max[mask_mi],
-#             alpha=0.2, color=line_mi.get_color(), linewidth=0
-#         )
-#
-#     # TVD proxy line + shadow
-#     tvd_mean = np.asarray(tvd_stats["mean"], dtype=float)
-#     tvd_min  = np.asarray(tvd_stats["min"], dtype=float)
-#     tvd_max  = np.asarray(tvd_stats["max"], dtype=float)
-#
-#     line_tvd, = ax.plot(x, tvd_mean, marker="o", linewidth=2,
-#                         label="ProxyMutualInformationTVD (no noise)")
-#     mask_tvd = ~np.isnan(x) & ~np.isnan(tvd_min) & ~np.isnan(tvd_max)
-#     if mask_tvd.any():
-#         ax.fill_between(
-#             x[mask_tvd], tvd_min[mask_tvd], tvd_max[mask_tvd],
-#             alpha=0.2, color=line_tvd.get_color(), linewidth=0
-#         )
-#
-#     ax.set_xlabel("Demographic Parity gap")
-#     ax.set_ylabel("measure value")
-#     ax.grid(True, linestyle="--", alpha=0.4)
-#     ax.set_title("MI vs TVD proxy on synthetic data (no noise)")
-#
-#     os.makedirs(os.path.dirname(outfile), exist_ok=True)
-#     plt.tight_layout()
-#     plt.savefig(outfile, dpi=600, bbox_inches="tight")
-#     plt.show()
-
-
-# def run_experiment_10(
-#     repetitions: int = 5,
-#     epsilon: float = 1.0,
-#     rf_complexities: tuple[int, ...] = (10, 50, 100, 200),
-#     nn_complexities: tuple[int, ...] = (1, 2, 3, 4),
-#     outfile_rf_acc: str = "plots/experiment10_rf_accuracy.png",
-#     outfile_rf_time: str = "plots/experiment10_rf_time.png",
-#     outfile_rf_dp: str = "plots/experiment10_rf_dp.png",
-#     outfile_nn_acc: str = "plots/experiment10_nn_accuracy.png",
-#     outfile_nn_time: str = "plots/experiment10_nn_time.png",
-#     outfile_nn_dp: str = "plots/experiment10_nn_dp.png",
-# ):
-#     """
-#     Experiment 10 (IPUMS-CPS / Census):
-#     Plot, for each model separately:
-#       1) complexity parameter vs accuracy
-#       2) complexity parameter vs training time
-#       3) complexity parameter vs demographic parity
-#
-#     Models:
-#       - Random Forest: complexity = number of trees
-#       - Neural Network: complexity = number of hidden layers
-#
-#     Uses:
-#       - IPUMS-CPS dataset
-#       - all tuples
-#       - response column INCTOT
-#       - criterion [HEALTH, INCTOT, AGE]
-#
-#     Important:
-#       - NaN values are not dropped; they are converted into explicit categories.
-#     """
-#
-#     # ------------------------------------------------------------
-#     # 1. Load Census
-#     # ------------------------------------------------------------
-#     path = datasets["IPUMS-CPS"]["path"]
-#     raw_df = pd.read_csv(path)
-#
-#     # keep your existing dataset-specific preprocessing
-#     data = _encode_and_clean(path, list(raw_df.columns))
-#
-#     criterion = ["HEALTH", "INCTOT", "AGE"]
-#     protected_col = "HEALTH"
-#     response_col = "INCTOT"
-#     admissible_col = "AGE"
-#
-#     required_cols = [protected_col, admissible_col, response_col]
-#     missing = [c for c in required_cols if c not in data.columns]
-#     if missing:
-#         raise ValueError(f"Missing columns {missing}")
-#
-#     # ------------------------------------------------------------
-#     # 2. Keep NaNs and categorize them
-#     # ------------------------------------------------------------
-#     # For numeric columns: replace NaN with a sentinel category/value.
-#     # For non-numeric columns: replace NaN with string category "Missing".
-#     data = data.copy()
-#     for c in data.columns:
-#         if pd.api.types.is_numeric_dtype(data[c]):
-#             data[c] = data[c].fillna(-1)
-#         else:
-#             data[c] = data[c].astype("object").fillna("Missing")
-#
-#     n = len(data)
-#     if n < 100:
-#         raise ValueError(f"Too few rows after cleaning (n={n}).")
-#
-#     # ------------------------------------------------------------
-#     # 3. Helpers
-#     # ------------------------------------------------------------
-#     def _dp_gap(y_pred: np.ndarray, protected_values: np.ndarray) -> float:
-#         """
-#         Demographic parity gap:
-#             max_g P(ŷ = positive_label | S = g) - min_g P(ŷ = positive_label | S = g)
-#
-#         For multiclass INCTOT, we treat the largest predicted class label as the
-#         "positive" outcome to keep DP defined for this experiment.
-#         """
-#         if len(y_pred) == 0:
-#             return np.nan
-#
-#         positive_label = np.max(y_pred)
-#         pos = (y_pred == positive_label).astype(float)
-#
-#         df_eval = pd.DataFrame({
-#             "pos": pos,
-#             "s": protected_values,
-#         })
-#         rates = df_eval.groupby("s")["pos"].mean()
-#         return float(rates.max() - rates.min()) if len(rates) else np.nan
-#
-#     def _sample_census():
-#         sample = get_sample(
-#             df=data,
-#             n=n,
-#             fairness_criteria=[criterion],
-#             mode="cap",
-#         ).copy()
-#
-#         # keep NaN categories in the sampled frame too
-#         for c in sample.columns:
-#             if pd.api.types.is_numeric_dtype(sample[c]):
-#                 sample[c] = sample[c].fillna(-1)
-#             else:
-#                 sample[c] = sample[c].astype("object").fillna("Missing")
-#
-#         feature_cols = [c for c in sample.columns if c != response_col]
-#         X = sample[feature_cols].to_numpy(dtype=float)
-#         y_raw = sample[response_col].to_numpy()
-#         s = sample[protected_col].to_numpy()
-#
-#         le = LabelEncoder()
-#         y = le.fit_transform(y_raw).astype(np.int64)
-#
-#         if len(np.unique(y)) < 2:
-#             return None
-#
-#         X = MinMaxScaler().fit_transform(X)
-#         strat = y if len(np.unique(y)) > 1 else None
-#
-#         X_train, X_test, y_train, y_test, s_train, s_test = train_test_split(
-#             X, y, s,
-#             test_size=0.2,
-#             stratify=strat,
-#         )
-#         return X_train, X_test, y_train, y_test, s_train, s_test
-#
-#     def _init_stats():
-#         return {"mean": [], "min": [], "max": []}
-#
-#     def _push_stats(stats, arr):
-#         arr = np.asarray(arr, dtype=float)
-#         arr = arr[~np.isnan(arr)]
-#         if arr.size == 0:
-#             stats["mean"].append(np.nan)
-#             stats["min"].append(np.nan)
-#             stats["max"].append(np.nan)
-#         else:
-#             stats["mean"].append(float(np.mean(arr)))
-#             stats["min"].append(float(np.min(arr)))
-#             stats["max"].append(float(np.max(arr)))
-#
-#     def _train_and_eval_rf(
-#         X_train, X_test, y_train, y_test, s_test,
-#         n_estimators: int,
-#     ):
-#         classes = sorted(np.unique(y_train).tolist())
-#
-#         start_train = time.perf_counter()
-#         clf = RandomForestClassifier(
-#             n_estimators=int(n_estimators),
-#             max_depth=15,
-#             shuffle=True,
-#             classes=classes,
-#             epsilon=float(epsilon),
-#         )
-#         clf.fit(X_train, y_train)
-#         train_time = time.perf_counter() - start_train
-#
-#         y_pred = clf.predict(X_test)
-#         acc = accuracy_score(y_test, y_pred)
-#         dp = _dp_gap(y_pred, s_test)
-#         return train_time, acc, dp
-#
-#     def _train_and_eval_nn(
-#         X_train, X_test, y_train, y_test, s_test,
-#         n_layers: int,
-#     ):
-#         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#
-#         X_train_t = torch.tensor(X_train, dtype=torch.float32)
-#         y_train_t = torch.tensor(y_train, dtype=torch.long)
-#         X_test_t = torch.tensor(X_test, dtype=torch.float32).to(device)
-#
-#         train_ds = TensorDataset(X_train_t, y_train_t)
-#         batch_size = min(256, len(train_ds))
-#         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-#
-#         input_dim = X_train.shape[1]
-#         num_classes = int(len(np.unique(y_train)))
-#         epochs = 80
-#
-#         class DeepNN(nn.Module):
-#             def __init__(self, d_in: int, n_layers: int, n_out: int, hidden_dim: int = 64):
-#                 super().__init__()
-#                 layers = [nn.Linear(d_in, hidden_dim), nn.ReLU()]
-#                 for _ in range(max(0, n_layers - 1)):
-#                     layers.append(nn.Linear(hidden_dim, hidden_dim))
-#                     layers.append(nn.ReLU())
-#                 layers.append(nn.Linear(hidden_dim, n_out))
-#                 self.net = nn.Sequential(*layers)
-#
-#             def forward(self, x):
-#                 return self.net(x)
-#
-#         model = DeepNN(input_dim, int(n_layers), num_classes).to(device)
-#         criterion_loss = nn.CrossEntropyLoss()
-#         optimizer = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9)
-#
-#         privacy_engine = PrivacyEngine()
-#         model, optimizer, train_loader = privacy_engine.make_private_with_epsilon(
-#             module=model,
-#             optimizer=optimizer,
-#             data_loader=train_loader,
-#             target_epsilon=float(epsilon),
-#             target_delta=1e-5,
-#             epochs=epochs,
-#             max_grad_norm=1.0,
-#         )
-#
-#         start_train = time.perf_counter()
-#         model.train()
-#         for _ in range(epochs):
-#             for xb, yb in train_loader:
-#                 xb, yb = xb.to(device), yb.to(device)
-#                 optimizer.zero_grad()
-#                 logits = model(xb)
-#                 loss = criterion_loss(logits, yb)
-#                 loss.backward()
-#                 optimizer.step()
-#         train_time = time.perf_counter() - start_train
-#
-#         model.eval()
-#         with torch.no_grad():
-#             logits_test = model(X_test_t)
-#             y_pred = torch.argmax(logits_test, dim=1).cpu().numpy()
-#
-#         acc = accuracy_score(y_test, y_pred)
-#         dp = _dp_gap(y_pred, s_test)
-#         return train_time, acc, dp
-#
-#     def _plot_line(x, stats, xlabel, ylabel, title, outfile, color):
-#         fig, ax = plt.subplots(figsize=(8, 5))
-#
-#         y_mean = np.asarray(stats["mean"], dtype=float)
-#         y_min = np.asarray(stats["min"], dtype=float)
-#         y_max = np.asarray(stats["max"], dtype=float)
-#         x = np.asarray(x, dtype=float)
-#
-#         ax.plot(x, y_mean, marker="o", linewidth=2, color=color)
-#         mask = ~np.isnan(x) & ~np.isnan(y_mean) & ~np.isnan(y_min) & ~np.isnan(y_max)
-#         if mask.any():
-#             ax.fill_between(
-#                 x[mask],
-#                 y_min[mask],
-#                 y_max[mask],
-#                 alpha=0.2,
-#                 color=color,
-#                 linewidth=0,
-#             )
-#
-#         ax.set_xlabel(xlabel)
-#         ax.set_ylabel(ylabel)
-#         ax.set_title(title)
-#         ax.grid(True, linestyle="--", alpha=0.4)
-#
-#         os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
-#         plt.tight_layout()
-#         plt.savefig(outfile, dpi=600, bbox_inches="tight")
-#         plt.show()
-#
-#     # ------------------------------------------------------------
-#     # 4. Random Forest: trees vs accuracy/time/dp
-#     # ------------------------------------------------------------
-#     rf_acc_stats = _init_stats()
-#     rf_time_stats = _init_stats()
-#     rf_dp_stats = _init_stats()
-#
-#     for n_trees in rf_complexities:
-#         acc_rep = []
-#         time_rep = []
-#         dp_rep = []
-#
-#         for rep in range(repetitions):
-#             sampled = _sample_census()
-#             if sampled is None:
-#                 print(f"[RF trees={n_trees}] rep={rep+1}/{repetitions}: skipped")
-#                 continue
-#
-#             X_train, X_test, y_train, y_test, s_train, s_test = sampled
-#             train_time, acc, dp = _train_and_eval_rf(
-#                 X_train, X_test, y_train, y_test, s_test,
-#                 n_estimators=n_trees,
-#             )
-#
-#             acc_rep.append(acc)
-#             time_rep.append(train_time)
-#             dp_rep.append(dp)
-#
-#             print(
-#                 f"[RF trees={n_trees}] rep={rep+1}/{repetitions}: "
-#                 f"time={train_time:.3f}s acc={acc:.4f} dp={dp:.4f}"
-#             )
-#
-#         _push_stats(rf_acc_stats, acc_rep)
-#         _push_stats(rf_time_stats, time_rep)
-#         _push_stats(rf_dp_stats, dp_rep)
-#
-#     # ------------------------------------------------------------
-#     # 5. Neural Network: layers vs accuracy/time/dp
-#     # ------------------------------------------------------------
-#     nn_acc_stats = _init_stats()
-#     nn_time_stats = _init_stats()
-#     nn_dp_stats = _init_stats()
-#
-#     for n_layers in nn_complexities:
-#         acc_rep = []
-#         time_rep = []
-#         dp_rep = []
-#
-#         for rep in range(repetitions):
-#             sampled = _sample_census()
-#             if sampled is None:
-#                 print(f"[NN layers={n_layers}] rep={rep+1}/{repetitions}: skipped")
-#                 continue
-#
-#             X_train, X_test, y_train, y_test, s_train, s_test = sampled
-#             train_time, acc, dp = _train_and_eval_nn(
-#                 X_train, X_test, y_train, y_test, s_test,
-#                 n_layers=n_layers,
-#             )
-#
-#             acc_rep.append(acc)
-#             time_rep.append(train_time)
-#             dp_rep.append(dp)
-#
-#             print(
-#                 f"[NN layers={n_layers}] rep={rep+1}/{repetitions}: "
-#                 f"time={train_time:.3f}s acc={acc:.4f} dp={dp:.4f}"
-#             )
-#
-#         _push_stats(nn_acc_stats, acc_rep)
-#         _push_stats(nn_time_stats, time_rep)
-#         _push_stats(nn_dp_stats, dp_rep)
-#
-#     # round training-time stats to 3 decimals
-#     for stats in (rf_time_stats, nn_time_stats):
-#         stats["mean"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["mean"]]
-#         stats["min"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["min"]]
-#         stats["max"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["max"]]
-#
-#     plt.rcParams.update({
-#         "axes.titlesize": 18,
-#         "axes.labelsize": 22,
-#         "xtick.labelsize": 14,
-#         "ytick.labelsize": 14,
-#     })
-#
-#     # RF plots
-#     _plot_line(
-#         x=rf_complexities,
-#         stats=rf_acc_stats,
-#         xlabel="number of trees",
-#         ylabel="accuracy",
-#         title=f"Random Forest: trees vs accuracy (ε={epsilon})",
-#         outfile=outfile_rf_acc,
-#         color="violet",
-#     )
-#     _plot_line(
-#         x=rf_complexities,
-#         stats=rf_time_stats,
-#         xlabel="number of trees",
-#         ylabel="training time (s)",
-#         title=f"Random Forest: trees vs training time (ε={epsilon})",
-#         outfile=outfile_rf_time,
-#         color="violet",
-#     )
-#     _plot_line(
-#         x=rf_complexities,
-#         stats=rf_dp_stats,
-#         xlabel="number of trees",
-#         ylabel="demographic parity",
-#         title=f"Random Forest: trees vs demographic parity (ε={epsilon})",
-#         outfile=outfile_rf_dp,
-#         color="violet",
-#     )
-#
-#     # NN plots
-#     _plot_line(
-#         x=nn_complexities,
-#         stats=nn_acc_stats,
-#         xlabel="number of hidden layers",
-#         ylabel="accuracy",
-#         title=f"Neural Network: layers vs accuracy (ε={epsilon})",
-#         outfile=outfile_nn_acc,
-#         color="grey",
-#     )
-#     _plot_line(
-#         x=nn_complexities,
-#         stats=nn_time_stats,
-#         xlabel="number of hidden layers",
-#         ylabel="training time (s)",
-#         title=f"Neural Network: layers vs training time (ε={epsilon})",
-#         outfile=outfile_nn_time,
-#         color="grey",
-#     )
-#     _plot_line(
-#         x=nn_complexities,
-#         stats=nn_dp_stats,
-#         xlabel="number of hidden layers",
-#         ylabel="demographic parity",
-#         title=f"Neural Network: layers vs demographic parity (ε={epsilon})",
-#         outfile=outfile_nn_dp,
-#         color="grey",
-#     )
-
 def run_experiment_10(
-    repetitions: int = 5,
-    epsilon: float = 1.0,
-    rf_complexities: tuple[int, ...] = (10, 50, 100, 200),
-    nn_complexities: tuple[int, ...] = (1, 2, 3, 4),
-    outfile_rf_acc: str = "plots/experiment10_rf_accuracy.png",
-    outfile_rf_time: str = "plots/experiment10_rf_time.png",
-    outfile_rf_dp: str = "plots/experiment10_rf_dp.png",
-    outfile_rf_csp: str = "plots/experiment10_rf_csp.png",
-    outfile_nn_acc: str = "plots/experiment10_nn_accuracy.png",
-    outfile_nn_time: str = "plots/experiment10_nn_time.png",
-    outfile_nn_dp: str = "plots/experiment10_nn_dp.png",
-    outfile_nn_csp: str = "plots/experiment10_nn_csp.png",
+    step: float = 0.1,
+    n_per_sex: int = 100000,
+    repetitions: int = 10,
+    outfile: str = "plots/experiment10.png",
 ):
     """
-    Experiment 10 (Adult):
-    Plot, for each model separately:
-      1) complexity parameter vs accuracy
-      2) complexity parameter vs training time
-      3) complexity parameter vs demographic parity gap for [sex, income>50K]
-      4) complexity parameter vs conditional statistical parity gap
-         for [sex, income>50K, hours-per-week]
+    Experiment 10 (synthetic, NO-NOISE):
+    Measure *true* MutualInformation (MI) vs ProxyMutualInformationTVD (TVD proxy)
+    on the same synthetic 2x2 dataset used in run_experiment_7, while we increase unfairness.
 
-    Models:
-      - Random Forest: complexity = number of trees
-      - Neural Network: complexity = number of hidden layers
+    - We keep the same unfairness construction:
+        Start fair: P(income=1|sex=0)=0.5, P(income=1|sex=1)=0.5
+        Increase t in [0,1] by 'step':
+            flip t fraction of (male, income=0) -> income=1
+            flip t fraction of (female, income=1) -> income=0
+      At t=1: males always income=1, females always income=0.
 
-    Uses:
-      - Adult dataset
-      - full dataset each repetition
-      - all columns except income>50K as training features
-
-    Important:
-      - NaN values are not dropped; they are converted into explicit categories.
+    - For each t, we compute over 'repetitions':
+        * MI(sex ; income>50K) with epsilon=None
+        * TVD proxy on [sex, income>50K] with epsilon=None
+        * DP-gap (as a sanity x-axis / interpretability)
+      We plot MI and TVD vs DP-gap, with min..max shadow bands.
     """
 
-    # ------------------------------------------------------------
-    # 1. Load Adult
-    # ------------------------------------------------------------
-    path = datasets["Adult"]["path"]
-    raw_df = pd.read_csv(path)
-    data = _encode_and_clean(path, list(raw_df.columns))
+    # --- helpers -------------------------------------------------
+    def _make_dataset(t: float) -> pd.DataFrame:
+        """
+        Create synthetic dataset for a given unfairness level t in [0,1].
+        sex: 1=male, 0=female
+        income: 1=income>50K, 0=otherwise
+        """
+        n = int(n_per_sex)
 
-    protected_col = "sex"
-    response_col = "income>50K"
-    admissible_col = "hours-per-week"
+        # Base fair allocation:
+        m0 = n // 2
+        m1 = n - m0
+        f0 = n // 2
+        f1 = n - f0
 
-    required_cols = [protected_col, response_col, admissible_col]
-    missing = [c for c in required_cols if c not in data.columns]
-    if missing:
-        raise ValueError(f"Missing columns {missing}")
+        flip_m = int(round(t * m0))  # male: 0 -> 1
+        flip_f = int(round(t * f1))  # female: 1 -> 0
 
-    # ------------------------------------------------------------
-    # 2. Keep NaNs and categorize them
-    # ------------------------------------------------------------
-    data = data.copy()
-    for c in data.columns:
-        if pd.api.types.is_numeric_dtype(data[c]):
-            data[c] = data[c].fillna(-1)
-        else:
-            data[c] = data[c].astype("object").fillna("Missing")
+        m0_new = m0 - flip_m
+        m1_new = m1 + flip_m
+        f1_new = f1 - flip_f
+        f0_new = f0 + flip_f
 
-    if len(data) < 100:
-        raise ValueError(f"Too few rows after preprocessing (n={len(data)}).")
+        sex = np.concatenate([
+            np.ones(m0_new + m1_new, dtype=int),   # males = 1
+            np.zeros(f0_new + f1_new, dtype=int),  # females = 0
+        ])
+        income = np.concatenate([
+            np.concatenate([np.zeros(m0_new, dtype=int), np.ones(m1_new, dtype=int)]),
+            np.concatenate([np.zeros(f0_new, dtype=int), np.ones(f1_new, dtype=int)]),
+        ])
 
-    # ------------------------------------------------------------
-    # 3. Helpers
-    # ------------------------------------------------------------
-    def _dp_gap(y_pred: np.ndarray, protected_values: np.ndarray) -> float:
-        if len(y_pred) == 0:
-            return np.nan
-        pos = (y_pred == 1).astype(float)
-        rates = pd.Series(pos).groupby(pd.Series(protected_values)).mean()
-        return float(rates.max() - rates.min()) if len(rates) else np.nan
+        df = pd.DataFrame({"sex": sex, "income>50K": income})
+        df = df.sample(frac=1.0, replace=False).reset_index(drop=True)
+        return df
 
-    def _csp_gap(
-        y_pred: np.ndarray,
-        protected_values: np.ndarray,
-        admissible_values: np.ndarray,
-    ) -> float:
-        if len(y_pred) == 0:
-            return np.nan
+    def _dp_gap(df: pd.DataFrame) -> float:
+        rates = df.groupby("sex")["income>50K"].mean()
+        return float(abs(rates.max() - rates.min())) if len(rates) else 0.0
 
-        pos = (y_pred == 1).astype(float)
-        df_eval = pd.DataFrame({
-            "pos": pos,
-            "s": protected_values,
-            "a": admissible_values,
-        })
+    # --- grid ----------------------------------------------------
+    ts = [round(i * step, 10) for i in range(int(1 / step) + 1)]
+    criterion = ["sex", "income>50K"]
 
-        gaps = []
-        weights = []
-        for _, grp in df_eval.groupby("a", dropna=False):
-            rates = grp["pos"].groupby(grp["s"]).mean()
-            if len(rates) == 0:
-                continue
-            gaps.append(float(rates.max() - rates.min()))
-            weights.append(len(grp))
+    # store per-t stats
+    mi_stats = {"mean": [], "min": [], "max": []}
+    tvd_stats = {"mean": [], "min": [], "max": []}
+    dp_stats = {"mean": [], "min": [], "max": []}
 
-        return float(np.average(gaps, weights=weights)) if gaps else np.nan
-
-    def _prepare_split():
-        # use FULL dataset, not a sample, and all features except the target
-        df = data.copy()
-
-        feature_cols = [c for c in df.columns if c != response_col]
-        X = df[feature_cols].to_numpy(dtype=float)
-        y_raw = df[response_col].to_numpy()
-        s = df[protected_col].to_numpy()
-        a = df[admissible_col].to_numpy()
-
-        le = LabelEncoder()
-        y = le.fit_transform(y_raw).astype(np.int64)
-
-        if len(np.unique(y)) < 2:
-            return None
-
-        X = MinMaxScaler().fit_transform(X)
-        strat = y if len(np.unique(y)) > 1 else None
-
-        X_train, X_test, y_train, y_test, s_train, s_test, a_train, a_test = train_test_split(
-            X, y, s, a,
-            test_size=0.2,
-            stratify=strat,
-        )
-        return X_train, X_test, y_train, y_test, s_test, a_test
-
-    def _init_stats():
-        return {"mean": [], "min": [], "max": []}
-
-    def _push_stats(stats, arr):
-        arr = np.asarray(arr, dtype=float)
-        arr = arr[~np.isnan(arr)]
-        if arr.size == 0:
-            stats["mean"].append(np.nan)
-            stats["min"].append(np.nan)
-            stats["max"].append(np.nan)
-        else:
-            stats["mean"].append(float(np.mean(arr)))
-            stats["min"].append(float(np.min(arr)))
-            stats["max"].append(float(np.max(arr)))
-
-    def _train_and_eval_rf(
-        X_train, X_test, y_train, y_test, s_test, a_test,
-        n_estimators: int,
-    ):
-        classes = sorted(np.unique(y_train).tolist())
-
-        start_train = time.perf_counter()
-        clf = RandomForestClassifier(
-            n_estimators=int(n_estimators),
-            max_depth=15,
-            shuffle=True,
-            classes=classes,
-            epsilon=float(epsilon),
-        )
-        clf.fit(X_train, y_train)
-        train_time = time.perf_counter() - start_train
-
-        y_pred = clf.predict(X_test)
-        acc = accuracy_score(y_test, y_pred)
-        dp = _dp_gap(y_pred, s_test)
-        csp = _csp_gap(y_pred, s_test, a_test)
-        return train_time, acc, dp, csp
-
-    def _train_and_eval_nn(
-        X_train, X_test, y_train, y_test, s_test, a_test,
-        n_layers: int,
-    ):
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        X_train_t = torch.tensor(X_train, dtype=torch.float32)
-        y_train_t = torch.tensor(y_train, dtype=torch.long)
-        X_test_t = torch.tensor(X_test, dtype=torch.float32).to(device)
-
-        train_ds = TensorDataset(X_train_t, y_train_t)
-        batch_size = min(256, len(train_ds))
-        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-
-        input_dim = X_train.shape[1]
-        num_classes = int(len(np.unique(y_train)))
-        epochs = 80
-
-        class DeepNN(nn.Module):
-            def __init__(self, d_in: int, n_layers: int, n_out: int, hidden_dim: int = 64):
-                super().__init__()
-                layers = [nn.Linear(d_in, hidden_dim), nn.ReLU()]
-                for _ in range(max(0, n_layers - 1)):
-                    layers.append(nn.Linear(hidden_dim, hidden_dim))
-                    layers.append(nn.ReLU())
-                layers.append(nn.Linear(hidden_dim, n_out))
-                self.net = nn.Sequential(*layers)
-
-            def forward(self, x):
-                return self.net(x)
-
-        model = DeepNN(input_dim, int(n_layers), num_classes).to(device)
-        criterion_loss = nn.CrossEntropyLoss()
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9)
-
-        privacy_engine = PrivacyEngine()
-        model, optimizer, train_loader = privacy_engine.make_private_with_epsilon(
-            module=model,
-            optimizer=optimizer,
-            data_loader=train_loader,
-            target_epsilon=float(epsilon),
-            target_delta=1e-5,
-            epochs=epochs,
-            max_grad_norm=1.0,
-        )
-
-        start_train = time.perf_counter()
-        model.train()
-        for _ in range(epochs):
-            for xb, yb in train_loader:
-                xb, yb = xb.to(device), yb.to(device)
-                optimizer.zero_grad()
-                logits = model(xb)
-                loss = criterion_loss(logits, yb)
-                loss.backward()
-                optimizer.step()
-        train_time = time.perf_counter() - start_train
-
-        model.eval()
-        with torch.no_grad():
-            logits_test = model(X_test_t)
-            y_pred = torch.argmax(logits_test, dim=1).cpu().numpy()
-
-        acc = accuracy_score(y_test, y_pred)
-        dp = _dp_gap(y_pred, s_test)
-        csp = _csp_gap(y_pred, s_test, a_test)
-        return train_time, acc, dp, csp
-
-    def _plot_line(x, stats, xlabel, ylabel, title, outfile, color):
-        fig, ax = plt.subplots(figsize=(8, 5))
-
-        y_mean = np.asarray(stats["mean"], dtype=float)
-        y_min = np.asarray(stats["min"], dtype=float)
-        y_max = np.asarray(stats["max"], dtype=float)
-        x = np.asarray(x, dtype=float)
-
-        ax.plot(x, y_mean, marker="o", linewidth=2, color=color)
-        mask = ~np.isnan(x) & ~np.isnan(y_mean) & ~np.isnan(y_min) & ~np.isnan(y_max)
-        if mask.any():
-            ax.fill_between(
-                x[mask],
-                y_min[mask],
-                y_max[mask],
-                alpha=0.2,
-                color=color,
-                linewidth=0,
-            )
-
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
-        ax.grid(True, linestyle="--", alpha=0.4)
-
-        os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
-        plt.tight_layout()
-        plt.savefig(outfile, dpi=600, bbox_inches="tight")
-        plt.show()
-
-    # ------------------------------------------------------------
-    # 4. Random Forest: trees vs accuracy/time/dp/csp
-    # ------------------------------------------------------------
-    rf_acc_stats = _init_stats()
-    rf_time_stats = _init_stats()
-    rf_dp_stats = _init_stats()
-    rf_csp_stats = _init_stats()
-
-    for n_trees in rf_complexities:
-        acc_rep = []
-        time_rep = []
+    # --- run -----------------------------------------------------
+    for t in ts:
+        mi_rep = []
+        tvd_rep = []
         dp_rep = []
-        csp_rep = []
 
-        for rep in range(repetitions):
-            prepared = _prepare_split()
-            if prepared is None:
-                print(f"[RF trees={n_trees}] rep={rep+1}/{repetitions}: skipped")
-                continue
+        for _ in range(repetitions):
+            df = _make_dataset(t)
 
-            X_train, X_test, y_train, y_test, s_test, a_test = prepared
-            train_time, acc, dp, csp = _train_and_eval_rf(
-                X_train, X_test, y_train, y_test, s_test, a_test,
-                n_estimators=n_trees,
-            )
+            # NO NOISE: epsilon=None
+            mi_val = MutualInformation(data=df[criterion].copy()).calculate([criterion], epsilon=None)
+            tvd_val = ProxyMutualInformationTVD(data=df[criterion].copy()).calculate([criterion], epsilon=None)
 
-            acc_rep.append(acc)
-            time_rep.append(train_time)
-            dp_rep.append(dp)
-            csp_rep.append(csp)
+            mi_rep.append(float(mi_val))
+            tvd_rep.append(float(tvd_val))
+            dp_rep.append(_dp_gap(df))
 
-            print(
-                f"[RF trees={n_trees}] rep={rep+1}/{repetitions}: "
-                f"time={train_time:.3f}s acc={acc:.4f} dp={dp:.4f} csp={csp:.4f}"
-            )
+        mi_arr = np.asarray(mi_rep, dtype=float)
+        tvd_arr = np.asarray(tvd_rep, dtype=float)
+        dp_arr = np.asarray(dp_rep, dtype=float)
 
-        _push_stats(rf_acc_stats, acc_rep)
-        _push_stats(rf_time_stats, time_rep)
-        _push_stats(rf_dp_stats, dp_rep)
-        _push_stats(rf_csp_stats, csp_rep)
+        mi_stats["mean"].append(float(np.nanmean(mi_arr)))
+        mi_stats["min"].append(float(np.nanmin(mi_arr)))
+        mi_stats["max"].append(float(np.nanmax(mi_arr)))
 
-    # ------------------------------------------------------------
-    # 5. Neural Network: layers vs accuracy/time/dp/csp
-    # ------------------------------------------------------------
-    nn_acc_stats = _init_stats()
-    nn_time_stats = _init_stats()
-    nn_dp_stats = _init_stats()
-    nn_csp_stats = _init_stats()
+        tvd_stats["mean"].append(float(np.nanmean(tvd_arr)))
+        tvd_stats["min"].append(float(np.nanmin(tvd_arr)))
+        tvd_stats["max"].append(float(np.nanmax(tvd_arr)))
 
-    for n_layers in nn_complexities:
-        acc_rep = []
-        time_rep = []
-        dp_rep = []
-        csp_rep = []
+        dp_stats["mean"].append(float(np.nanmean(dp_arr)))
+        dp_stats["min"].append(float(np.nanmin(dp_arr)))
+        dp_stats["max"].append(float(np.nanmax(dp_arr)))
 
-        for rep in range(repetitions):
-            prepared = _prepare_split()
-            if prepared is None:
-                print(f"[NN layers={n_layers}] rep={rep+1}/{repetitions}: skipped")
-                continue
-
-            X_train, X_test, y_train, y_test, s_test, a_test = prepared
-            train_time, acc, dp, csp = _train_and_eval_nn(
-                X_train, X_test, y_train, y_test, s_test, a_test,
-                n_layers=n_layers,
-            )
-
-            acc_rep.append(acc)
-            time_rep.append(train_time)
-            dp_rep.append(dp)
-            csp_rep.append(csp)
-
-            print(
-                f"[NN layers={n_layers}] rep={rep+1}/{repetitions}: "
-                f"time={train_time:.3f}s acc={acc:.4f} dp={dp:.4f} csp={csp:.4f}"
-            )
-
-        _push_stats(nn_acc_stats, acc_rep)
-        _push_stats(nn_time_stats, time_rep)
-        _push_stats(nn_dp_stats, dp_rep)
-        _push_stats(nn_csp_stats, csp_rep)
-
-    # round training-time stats to 3 decimals
-    for stats in (rf_time_stats, nn_time_stats):
-        stats["mean"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["mean"]]
-        stats["min"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["min"]]
-        stats["max"] = [round(v, 3) if not np.isnan(v) else np.nan for v in stats["max"]]
-
-    plt.rcParams.update({
-        "axes.titlesize": 18,
-        "axes.labelsize": 22,
-        "xtick.labelsize": 14,
-        "ytick.labelsize": 14,
-    })
-
-    # RF plots
-    _plot_line(
-        x=rf_complexities,
-        stats=rf_acc_stats,
-        xlabel="number of trees",
-        ylabel="accuracy",
-        title=f"Random Forest: trees vs accuracy (ε={epsilon})",
-        outfile=outfile_rf_acc,
-        color="violet",
-    )
-    _plot_line(
-        x=rf_complexities,
-        stats=rf_time_stats,
-        xlabel="number of trees",
-        ylabel="training time (s)",
-        title=f"Random Forest: trees vs training time (ε={epsilon})",
-        outfile=outfile_rf_time,
-        color="violet",
-    )
-    _plot_line(
-        x=rf_complexities,
-        stats=rf_dp_stats,
-        xlabel="number of trees",
-        ylabel="demographic parity gap",
-        title=f"Random Forest: trees vs demographic parity gap (ε={epsilon})",
-        outfile=outfile_rf_dp,
-        color="violet",
-    )
-    _plot_line(
-        x=rf_complexities,
-        stats=rf_csp_stats,
-        xlabel="number of trees",
-        ylabel="conditional statistical parity gap",
-        title=f"Random Forest: trees vs conditional statistical parity gap (ε={epsilon})",
-        outfile=outfile_rf_csp,
-        color="violet",
-    )
-
-    # NN plots
-    _plot_line(
-        x=nn_complexities,
-        stats=nn_acc_stats,
-        xlabel="number of hidden layers",
-        ylabel="accuracy",
-        title=f"Neural Network: layers vs accuracy (ε={epsilon})",
-        outfile=outfile_nn_acc,
-        color="grey",
-    )
-    _plot_line(
-        x=nn_complexities,
-        stats=nn_time_stats,
-        xlabel="number of hidden layers",
-        ylabel="training time (s)",
-        title=f"Neural Network: layers vs training time (ε={epsilon})",
-        outfile=outfile_nn_time,
-        color="grey",
-    )
-    _plot_line(
-        x=nn_complexities,
-        stats=nn_dp_stats,
-        xlabel="number of hidden layers",
-        ylabel="demographic parity gap",
-        title=f"Neural Network: layers vs demographic parity gap (ε={epsilon})",
-        outfile=outfile_nn_dp,
-        color="grey",
-    )
-    _plot_line(
-        x=nn_complexities,
-        stats=nn_csp_stats,
-        xlabel="number of hidden layers",
-        ylabel="conditional statistical parity gap",
-        title=f"Neural Network: layers vs conditional statistical parity gap (ε={epsilon})",
-        outfile=outfile_nn_csp,
-        color="grey",
-    )
-
-def run_experiment_10_measures(
-    repetitions: int = 5,
-    epsilon: float = 1.0,
-    num_tuples: int | None = None,
-    outfile_tvd: str = "plots/experiment10_tvd.png",
-    outfile_repair: str = "plots/experiment10_repair.png",
-    outfile_tc: str = "plots/experiment10_tc.png",
-):
-    """
-    Plot unfairness-measure values for two Adult fairness criteria, using the same
-    sampled data in each repetition for all measures and both criteria.
-    """
-
-    # ------------------------------------------------------------
-    # 1. Load Adult
-    # ------------------------------------------------------------
-    path = datasets["Adult"]["path"]
-    raw_df = pd.read_csv(path)
-    data = _encode_and_clean(path, list(raw_df.columns))
-
-    criteria = [
-        ["sex", "income>50K"],
-        ["sex", "income>50K", "hours-per-week"],
-    ]
-
-    required_cols = sorted(set(c for crit in criteria for c in crit))
-    missing = [c for c in required_cols if c not in data.columns]
-    if missing:
-        raise ValueError(f"Missing columns {missing}")
-
-    # ------------------------------------------------------------
-    # 2. Keep NaNs and categorize them
-    # ------------------------------------------------------------
-    data = data.copy()
-    for c in data.columns:
-        if pd.api.types.is_numeric_dtype(data[c]):
-            data[c] = data[c].fillna(-1)
-        else:
-            data[c] = data[c].astype("object").fillna("Missing")
-
-    if len(data) < 100:
-        raise ValueError(f"Too few rows after preprocessing (n={len(data)}).")
-
-    n = len(data) if num_tuples is None else min(num_tuples, len(data))
-
-    # ------------------------------------------------------------
-    # 3. Helpers
-    # ------------------------------------------------------------
-    def _densify_columns(df: pd.DataFrame) -> pd.DataFrame:
-        out = df.copy()
-        for c in out.columns:
-            codes, _ = pd.factorize(out[c], sort=False)
-            out[c] = codes.astype(np.int64)
-        return out
-
-    def _criterion_label(criterion: list[str]) -> str:
-        if len(criterion) == 2:
-            return f"{criterion[0]} ⟂ {criterion[1]}"
-        return f"{criterion[0]} ⟂ {criterion[1]} | {criterion[2]}"
-
-    def _init_stats():
-        return {"mean": [], "min": [], "max": []}
-
-    def _push_stats(stats, arr):
-        arr = np.asarray(arr, dtype=float)
-        arr = arr[~np.isnan(arr)]
-        if arr.size == 0:
-            stats["mean"].append(np.nan)
-            stats["min"].append(np.nan)
-            stats["max"].append(np.nan)
-        else:
-            stats["mean"].append(float(np.mean(arr)))
-            stats["min"].append(float(np.min(arr)))
-            stats["max"].append(float(np.max(arr)))
-
-    def _plot_line(x, stats, xticklabels, xlabel, ylabel, title, outfile, color):
-        fig, ax = plt.subplots(figsize=(8, 5))
-
-        y_mean = np.asarray(stats["mean"], dtype=float)
-        y_min = np.asarray(stats["min"], dtype=float)
-        y_max = np.asarray(stats["max"], dtype=float)
-        x = np.asarray(x, dtype=float)
-
-        ax.plot(x, y_mean, marker="o", linewidth=2, color=color)
-        mask = ~np.isnan(x) & ~np.isnan(y_mean) & ~np.isnan(y_min) & ~np.isnan(y_max)
-        if mask.any():
-            ax.fill_between(
-                x[mask],
-                y_min[mask],
-                y_max[mask],
-                alpha=0.2,
-                color=color,
-                linewidth=0,
-            )
-
-        ax.set_xticks(x)
-        ax.set_xticklabels(xticklabels)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
-        ax.grid(True, linestyle="--", alpha=0.4)
-
-        os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
-        plt.tight_layout()
-        plt.savefig(outfile, dpi=600, bbox_inches="tight")
-        plt.show()
-
-    # ------------------------------------------------------------
-    # 4. Storage: one list per criterion per measure
-    # ------------------------------------------------------------
-    tvd_per_criterion = [[] for _ in criteria]
-    repair_per_criterion = [[] for _ in criteria]
-    tc_per_criterion = [[] for _ in criteria]
-
-    # ------------------------------------------------------------
-    # 5. Run measures on the SAME sample per repetition
-    # ------------------------------------------------------------
-    for rep in range(repetitions):
-        sample = get_sample(
-            df=data,
-            n=n,
-            fairness_criteria=criteria,
-            mode="cap",
-        ).copy()
-
-        print(f"\n=== Repetition {rep+1}/{repetitions} ===")
-
-        for i, criterion in enumerate(criteria):
-            sub = _densify_columns(sample[criterion].copy())
-
-            tvd_val = ProxyMutualInformationTVD(data=sub).calculate([criterion], epsilon=epsilon)
-            repair_val = ProxyRepairMaxSat(data=sub).calculate([criterion], epsilon=epsilon)
-            tc_val = TupleContribution(data=sub).calculate([criterion], epsilon=epsilon)
-
-            tvd_per_criterion[i].append(float(tvd_val))
-            repair_per_criterion[i].append(float(repair_val))
-            tc_per_criterion[i].append(float(tc_val))
-
-            print(
-                f"[criterion={criterion}] rep={rep+1}/{repetitions}: "
-                f"tvd={float(tvd_val):.6f} "
-                f"repair={float(repair_val):.6f} "
-                f"tc={float(tc_val):.6f}"
-            )
-
-    # ------------------------------------------------------------
-    # 6. Aggregate stats
-    # ------------------------------------------------------------
-    tvd_stats = _init_stats()
-    repair_stats = _init_stats()
-    tc_stats = _init_stats()
-
-    for i in range(len(criteria)):
-        _push_stats(tvd_stats, tvd_per_criterion[i])
-        _push_stats(repair_stats, repair_per_criterion[i])
-        _push_stats(tc_stats, tc_per_criterion[i])
-
-    # ------------------------------------------------------------
-    # 7. Plot
-    # ------------------------------------------------------------
-    plt.rcParams.update({
-        "axes.titlesize": 18,
-        "axes.labelsize": 22,
-        "xtick.labelsize": 14,
-        "ytick.labelsize": 14,
-    })
-
-    x = np.arange(1, len(criteria) + 1)
-    xticklabels = [str(i) for i in x]
-
-    _plot_line(
-        x=x,
-        stats=tvd_stats,
-        xticklabels=xticklabels,
-        xlabel="criterion",
-        ylabel="measure value",
-        title=f"{r'$\mutualproxytvd$'} on Adult (ε={epsilon})",
-        outfile=outfile_tvd,
-        color="tab:blue",
-    )
-
-    _plot_line(
-        x=x,
-        stats=repair_stats,
-        xticklabels=xticklabels,
-        xlabel="criterion",
-        ylabel="measure value",
-        title=f"{r'$\repairsat$'} on Adult (ε={epsilon})",
-        outfile=outfile_repair,
-        color="tab:orange",
-    )
-
-    _plot_line(
-        x=x,
-        stats=tc_stats,
-        xticklabels=xticklabels,
-        xlabel="criterion",
-        ylabel="measure value",
-        title=f"{r'$\contribution$'} on Adult (ε={epsilon})",
-        outfile=outfile_tc,
-        color="tab:green",
-    )
-
-    # ------------------------------------------------------------
-    # 8. Print summary
-    # ------------------------------------------------------------
-    print("\n=== Summary ===")
-    for i, criterion in enumerate(criteria):
         print(
-            f"Criterion {i+1} ({_criterion_label(criterion)}): "
-            f"TVD={tvd_stats['mean'][i]:.6f}, "
-            f"Repair={repair_stats['mean'][i]:.6f}, "
-            f"TC={tc_stats['mean'][i]:.6f}"
+            f"t={t:.1f}  DP-gap≈{dp_stats['mean'][-1]:.3f}  "
+            f"MI≈{mi_stats['mean'][-1]:.6f}  TVD≈{tvd_stats['mean'][-1]:.6f}"
         )
+
+    # --- plot ----------------------------------------------------
+    plt.rcParams.update({
+        "axes.titlesize": 20,
+        "axes.labelsize": 30,
+        "xtick.labelsize": 18,
+        "ytick.labelsize": 18,
+    })
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    x = np.asarray(dp_stats["mean"], dtype=float)
+
+    # MI line + shadow (LIGHT RED)
+    mi_mean = np.asarray(mi_stats["mean"], dtype=float)
+    mi_min = np.asarray(mi_stats["min"], dtype=float)
+    mi_max = np.asarray(mi_stats["max"], dtype=float)
+
+    line_mi, = ax.plot(
+        x, mi_mean,
+        marker="o",
+        linewidth=2,
+        color="#ff6b6b",  # light red
+        label="MutualInformation (no noise)"
+    )
+    mask_mi = ~np.isnan(x) & ~np.isnan(mi_min) & ~np.isnan(mi_max)
+    if mask_mi.any():
+        ax.fill_between(
+            x[mask_mi], mi_min[mask_mi], mi_max[mask_mi],
+            alpha=0.2,
+            color="#ff6b6b",
+            linewidth=0
+        )
+
+    # TVD proxy line + shadow (BLUE)
+    tvd_mean = np.asarray(tvd_stats["mean"], dtype=float)
+    tvd_min = np.asarray(tvd_stats["min"], dtype=float)
+    tvd_max = np.asarray(tvd_stats["max"], dtype=float)
+
+    line_tvd, = ax.plot(
+        x, tvd_mean,
+        marker="o",
+        linewidth=2,
+        color="#1f77b4",  # blue
+        label="ProxyMutualInformationTVD (no noise)"
+    )
+    mask_tvd = ~np.isnan(x) & ~np.isnan(tvd_min) & ~np.isnan(tvd_max)
+    if mask_tvd.any():
+        ax.fill_between(
+            x[mask_tvd], tvd_min[mask_tvd], tvd_max[mask_tvd],
+            alpha=0.2,
+            color="#1f77b4",
+            linewidth=0
+        )
+
+    ax.set_xlabel("Demographic Parity gap")
+    ax.set_ylabel("measure value")
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.set_title("MI vs TVD proxy on synthetic data (no noise)")
+
+    os.makedirs(os.path.dirname(outfile), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(outfile, dpi=600, bbox_inches="tight")
+    plt.show()
 
 
 if __name__ == "__main__":
-    # create_plot_0()
-    # create_plot_1()
-    # create_plot_2()
-    # create_plot_3()
-    # create_plot_4()
-    # plot_legend()
-    # run_experiment_1()
-    # run_experiment_2()
-    # run_experiment_3()
-    # run_experiment_4()
-    # run_experiment_5()
-    # run_experiment_6()
-    # run_experiment_7()
-    # run_experiment_8()
+    create_plot_0()
+    create_plot_1()
+    create_plot_2()
+    create_plot_3()
+    create_plot_4()
+    plot_legend()
+    run_experiment_1()
+    run_experiment_2()
+    run_experiment_3()
+    run_experiment_4()
+    run_experiment_5()
+    run_experiment_6()
+    run_experiment_7()
+    run_experiment_8()
     run_experiment_9()
-    # run_experiment_10()
+    run_experiment_10()
