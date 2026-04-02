@@ -1352,35 +1352,52 @@ def _encode_and_clean(data_path, cols):
     df = pd.read_csv(data_path)
     df = df.replace(["NA", "N/A", ""], pd.NA).copy()
 
+    # ------------------------------------------------------------
+    # 0) Special handling for Adult: make income>50K binary
+    # ------------------------------------------------------------
+    if data_path == "data/adult.csv" and "income>50K" in df.columns:
+        df["income>50K"] = (
+            df["income>50K"]
+            .astype(str)
+            .str.strip()
+            .map({
+                "<=50K": 0,
+                ">50K": 1,
+                "<=50K.": 0,
+                ">50K.": 1,
+            })
+        )
+
+    # ------------------------------------------------------------
     # 1) Numeric: replace negative values with 0 (only in selected cols)
+    # ------------------------------------------------------------
     for c in cols:
         if c in df.columns and pd.api.types.is_numeric_dtype(df[c]):
             df.loc[df[c] < 0, c] = 0
 
+    # ------------------------------------------------------------
     # 2) Special handling for IPUMS-CPS census data
+    # ------------------------------------------------------------
     if data_path == "data/census.csv":
-        # Bin AGE into buckets of 10: 1–10 -> 10, 11–20 -> 20, ...
         if "AGE" in df.columns:
             age = pd.to_numeric(df["AGE"], errors="coerce")
-            # Clamp to at least 1 so that 0 or invalids go into the first bucket
             age = age.fillna(1)
             age = np.clip(age, 1, None)
-            # (age-1)//10 gives 0 for 1–10, 1 for 11–20, etc.; then +1 and *10 -> 10, 20, ...
             df["AGE"] = (((age - 1) // 10) + 1) * 10
 
-        # Remove INCTOT > 200000 and discretize into 10k buckets
         if "INCTOT" in df.columns:
             inctot = pd.to_numeric(df["INCTOT"], errors="coerce")
             df = df[inctot <= 200000].copy()
             inctot = pd.to_numeric(df["INCTOT"], errors="coerce").fillna(0)
-            # Bucket size 10,000; adjust if you want different granularity
             df["INCTOT"] = (inctot // 10000) * 10000
 
+    # ------------------------------------------------------------
     # 3) Categorical: label-encode only non-numeric columns in `cols`
+    # ------------------------------------------------------------
     for c in cols:
         if c in df.columns and not pd.api.types.is_numeric_dtype(df[c]):
-            df[c] = df[c].astype("object")  # ensure object dtype
-            df[c] = df[c].fillna("Missing")  # treat NaN as a category
+            df[c] = df[c].astype("object")
+            df[c] = df[c].fillna("Missing")
             df[c] = LabelEncoder().fit_transform(df[c])
 
     return df
@@ -3020,7 +3037,7 @@ def run_experiment_8_measures(
 def run_experiment_9(
     num_tuples: int = 100000,
     repetitions: int = 10,
-    epsilon: Optional[float] = 1.0,
+    epsilon: Optional[float] = 10.0,
     outfile_csv_summary_adult: str = "plots/experiment9_adult_summary.csv",
     outfile_csv_summary_compas: str = "plots/experiment9_compas_summary.csv",
     outfile_excel_queries_adult: str = "plots/experiment9_adult_queries.xlsx",
@@ -3149,112 +3166,83 @@ def run_experiment_9(
         def _value_column_name(crit) -> str:
             return f"{_agg_short_name(crit)}-{crit[1]}"
 
-        def _laplace(scale: float) -> float:
-            if epsilon is None:
-                return 0.0
-            if epsilon <= 0:
-                raise ValueError("epsilon must be positive when adding Laplace noise.")
-            if scale <= 0:
-                return 0.0
-            return float(np.random.laplace(loc=0.0, scale=scale))
-
-        def _query_sensitivity(sample: pd.DataFrame, crit: list[str]) -> float:
-            """
-            Conservative global sensitivity for one released query answer.
-            We add Laplace noise only to the released query results.
-            """
-            y_col = crit[1]
-            y_vals = pd.to_numeric(sample[y_col], errors="coerce").dropna()
-
-            if y_vals.empty:
-                return 1.0
-
-            y_range = float(y_vals.max() - y_vals.min())
-
-            if epsilon is None or y_range == 0.0:
-                return 0.0
-
-            if len(crit) == 2:
-                # GROUP BY mean
-                s_col, _ = crit
-                counts = sample.groupby(s_col, dropna=False).size()
-                min_count = int(counts.min()) if len(counts) else 1
-                min_count = max(min_count, 1)
-                return y_range / min_count
-
-            s_col, _, a_col = crit
-
-            if _uses_median(crit):
-                # Conservative sensitivity for released medians
-                return y_range
-
-            # Conditional average-of-averages query:
-            # inner mean over (s, a), outer mean over a
-            inner_counts = sample.groupby([s_col, a_col], dropna=False).size()
-            min_inner_count = int(inner_counts.min()) if len(inner_counts) else 1
-            min_inner_count = max(min_inner_count, 1)
-
-            outer_counts = sample.groupby(a_col, dropna=False).size()
-            min_outer_groups = max(int(outer_counts.min()), 1) if len(outer_counts) else 1
-
-            # Conservative choice
-            return y_range / min_inner_count
-
         def _compute_query_table(sample: pd.DataFrame, crit: list[str], add_noise: bool = True) -> pd.DataFrame:
             value_col = _value_column_name(crit)
 
             if len(crit) == 2:
                 s_col, y_col = crit
+                grouped = sample.groupby(s_col, dropna=False)[y_col]
+
                 out = (
-                    sample.groupby(s_col, dropna=False)[y_col]
-                    .mean()
+                    grouped.mean()
                     .reset_index()
                     .rename(columns={y_col: value_col})
                     .sort_values(by=[s_col], kind="stable")
                     .reset_index(drop=True)
                 )
+
+                counts = grouped.size().reset_index(name="_group_count")
+                out = out.merge(counts, on=s_col, how="left")
+
             else:
                 s_col, y_col, a_col = crit
-
                 inner_group = sample.groupby([s_col, a_col], dropna=False)[y_col]
-                inner = (
-                    (inner_group.median() if _uses_median(crit) else inner_group.mean())
-                    .reset_index()
-                    .rename(columns={y_col: value_col})
-                )
 
-                outer_group = inner.groupby(a_col, dropna=False)[value_col]
-                out = (
-                    (outer_group.median() if _uses_median(crit) else outer_group.mean())
-                    .reset_index()
-                    .sort_values(by=[a_col], kind="stable")
-                    .reset_index(drop=True)
-                )
+                if _uses_median(crit):
+                    inner = (
+                        inner_group.median()
+                        .reset_index()
+                        .rename(columns={y_col: value_col})
+                    )
+
+                    out = (
+                        inner.groupby(a_col, dropna=False)[value_col]
+                        .median()
+                        .reset_index()
+                        .sort_values(by=[a_col], kind="stable")
+                        .reset_index(drop=True)
+                    )
+
+                    out["_sens"] = 10.0
+
+                else:
+                    inner = (
+                        inner_group.mean()
+                        .reset_index()
+                        .rename(columns={y_col: value_col})
+                    )
+
+                    inner_counts = inner_group.size().reset_index(name="_group_count")
+                    inner = inner.merge(inner_counts, on=[s_col, a_col], how="left")
+
+                    out = (
+                        inner.groupby(a_col, dropna=False)[value_col]
+                        .mean()
+                        .reset_index()
+                        .sort_values(by=[a_col], kind="stable")
+                        .reset_index(drop=True)
+                    )
+
+                    # Sensitivity for each released outer average:
+                    # Adult: 1 / group size
+                    # Compas: 9 / group size
+                    outer_counts = inner.groupby(a_col, dropna=False)["_group_count"].sum().reset_index(name="_group_count")
+                    out = out.merge(outer_counts, on=a_col, how="left")
+
+            if len(crit) == 2:
+                avg_range = 1.0 if dataset_name == "Adult" else 9.0
+                out["_sens"] = avg_range / out["_group_count"].clip(lower=1).astype(float)
+            elif not _uses_median(crit):
+                avg_range = 1.0 if dataset_name == "Adult" else 9.0
+                out["_sens"] = avg_range / out["_group_count"].clip(lower=1).astype(float)
 
             if add_noise and epsilon is not None:
-                sens = _query_sensitivity(sample, crit)
-                out[value_col] = out[value_col].astype(float) + np.random.laplace(
-                    loc=0.0,
-                    scale=(sens / epsilon) if sens > 0 else 0.0,
-                    size=len(out),
-                )
+                out[value_col] = [
+                    float(v) + np.random.laplace(loc=0.0, scale=float(s) / epsilon)
+                    for v, s in zip(out[value_col].astype(float), out["_sens"].astype(float))
+                ]
 
-            return out
-
-        def _aggregate_query_tables(query_tables_by_rep: list[pd.DataFrame], crit: list[str]) -> pd.DataFrame:
-            if len(query_tables_by_rep) == 0:
-                return pd.DataFrame()
-
-            value_col = _value_column_name(crit)
-            merged = pd.concat(query_tables_by_rep, ignore_index=True)
-            group_cols = [c for c in merged.columns if c != value_col]
-
-            out = (
-                merged.groupby(group_cols, as_index=False)[value_col]
-                .mean()
-                .sort_values(by=group_cols, kind="stable")
-                .reset_index(drop=True)
-            )
+            out = out.drop(columns=[c for c in ["_group_count", "_sens"] if c in out.columns])
             return out
 
         def _unconditional_story_stats(sample: pd.DataFrame, s_col: str, y_col: str):
@@ -3317,72 +3305,50 @@ def run_experiment_9(
         if n < 50:
             raise ValueError(f"Too few rows after cleaning (n={n}). Increase num_tuples.")
 
-        # ---------------- collect query disparity summaries ----------------
+        # ---------------- compute queries once ----------------
 
         print(f"################### Computing Queries for {dataset_name} ###################")
 
+        sample_queries = get_sample(
+            df=data,
+            n=n,
+            fairness_criteria=criteria,
+        ).copy()
+
         story_rows = []
-        query_tables_per_criterion = {tuple(crit): [] for crit in criteria}
+        excel_tables = []
 
-        for rep in range(repetitions):
-            sample = get_sample(
-                df=raw_df,
-                n=n,
-                fairness_criteria=criteria,
-            ).copy()
+        for i, crit in enumerate(criteria, start=1 + query_index_offset):
+            crit_label = _criterion_label(crit)
+            query_sql = _query_string(crit)
 
-            for crit in criteria:
-                y_col = crit[1]
-                sample[y_col] = pd.to_numeric(sample[y_col], errors="coerce").astype(float)
+            q_table = _compute_query_table(sample_queries, crit, add_noise=True)
+            excel_tables.append((_query_title(i, crit), q_table))
 
-            for crit in criteria:
-                crit_label = _criterion_label(crit)
-                query_sql = _query_string(crit)
+            if len(crit) == 2:
+                s_col, y_col = crit
+                stats = _unconditional_story_stats(sample_queries, s_col, y_col)
+            else:
+                s_col, y_col, a_col = crit
+                stats = _conditional_story_stats(
+                    sample_queries,
+                    s_col,
+                    y_col,
+                    a_col,
+                    use_median=_uses_median(crit),
+                )
 
-                # Add Laplace noise only to released query results
-                q_table = _compute_query_table(sample, crit, add_noise=True)
-                query_tables_per_criterion[tuple(crit)].append(q_table)
-
-                # Keep disparity computation unchanged; measures already include noise separately
-                if len(crit) == 2:
-                    s_col, y_col = crit
-                    stats = _unconditional_story_stats(sample, s_col, y_col)
-                else:
-                    s_col, y_col, a_col = crit
-                    stats = _conditional_story_stats(
-                        sample,
-                        s_col,
-                        y_col,
-                        a_col,
-                        use_median=_uses_median(crit),
-                    )
-
-                story_rows.append({
-                    "criterion": crit_label,
-                    "query": query_sql,
-                    **stats,
-                })
-
-            print(f"{dataset_name}: finished query repetition {rep + 1}/{repetitions}")
+            story_rows.append({
+                "criterion": crit_label,
+                "query": query_sql,
+                **stats,
+            })
 
         df_story = (
             pd.DataFrame(story_rows)
-            .groupby(["criterion", "query"], as_index=False)
-            .agg(
-                min_group_rate=("min_group_rate", "mean"),
-                max_group_rate=("max_group_rate", "mean"),
-                query_disparity=("query_disparity", "mean"),
-            )
             .sort_values("query_disparity", ascending=False, kind="stable")
             .reset_index(drop=True)
         )
-
-        # ---------------- build and save excel query tables immediately ----------------
-
-        excel_tables = []
-        for i, crit in enumerate(criteria, start=1 + query_index_offset):
-            agg_q = _aggregate_query_tables(query_tables_per_criterion[tuple(crit)], crit)
-            excel_tables.append((_query_title(i, crit), agg_q))
 
         _write_queries_excel(excel_tables, outfile_excel_queries)
 
@@ -3402,7 +3368,7 @@ def run_experiment_9(
 
             for rep in range(repetitions):
                 sample = get_sample(
-                    df=data,
+                    df=raw_df,
                     n=n,
                     fairness_criteria=criteria,
                 ).copy()
@@ -3705,19 +3671,19 @@ def run_experiment_10(
 
 
 if __name__ == "__main__":
-    create_plot_0()
-    create_plot_1()
-    create_plot_2()
-    create_plot_3()
-    create_plot_4()
-    plot_legend()
-    run_experiment_1()
-    run_experiment_2()
-    run_experiment_3()
-    run_experiment_4()
-    run_experiment_5()
-    run_experiment_6()
-    run_experiment_7()
-    run_experiment_8()
+    # create_plot_0()
+    # create_plot_1()
+    # create_plot_2()
+    # create_plot_3()
+    # create_plot_4()
+    # plot_legend()
+    # run_experiment_1()
+    # run_experiment_2()
+    # run_experiment_3()
+    # run_experiment_4()
+    # run_experiment_5()
+    # run_experiment_6()
+    # run_experiment_7()
+    # run_experiment_8()
     run_experiment_9()
-    run_experiment_10()
+    # run_experiment_10()
