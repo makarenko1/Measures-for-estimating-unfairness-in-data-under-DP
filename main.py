@@ -3020,7 +3020,7 @@ def run_experiment_8_measures(
 def run_experiment_9(
     num_tuples: int = 100000,
     repetitions: int = 10,
-    epsilon: Optional[float] = 10.0,
+    epsilon: Optional[float] = 1.0,
     outfile_csv_summary_adult: str = "plots/experiment9_adult_summary.csv",
     outfile_csv_summary_compas: str = "plots/experiment9_compas_summary.csv",
     outfile_excel_queries_adult: str = "plots/experiment9_adult_queries.xlsx",
@@ -3149,7 +3149,58 @@ def run_experiment_9(
         def _value_column_name(crit) -> str:
             return f"{_agg_short_name(crit)}-{crit[1]}"
 
-        def _compute_query_table(sample: pd.DataFrame, crit: list[str]) -> pd.DataFrame:
+        def _laplace(scale: float) -> float:
+            if epsilon is None:
+                return 0.0
+            if epsilon <= 0:
+                raise ValueError("epsilon must be positive when adding Laplace noise.")
+            if scale <= 0:
+                return 0.0
+            return float(np.random.laplace(loc=0.0, scale=scale))
+
+        def _query_sensitivity(sample: pd.DataFrame, crit: list[str]) -> float:
+            """
+            Conservative global sensitivity for one released query answer.
+            We add Laplace noise only to the released query results.
+            """
+            y_col = crit[1]
+            y_vals = pd.to_numeric(sample[y_col], errors="coerce").dropna()
+
+            if y_vals.empty:
+                return 1.0
+
+            y_range = float(y_vals.max() - y_vals.min())
+
+            if epsilon is None or y_range == 0.0:
+                return 0.0
+
+            if len(crit) == 2:
+                # GROUP BY mean
+                s_col, _ = crit
+                counts = sample.groupby(s_col, dropna=False).size()
+                min_count = int(counts.min()) if len(counts) else 1
+                min_count = max(min_count, 1)
+                return y_range / min_count
+
+            s_col, _, a_col = crit
+
+            if _uses_median(crit):
+                # Conservative sensitivity for released medians
+                return y_range
+
+            # Conditional average-of-averages query:
+            # inner mean over (s, a), outer mean over a
+            inner_counts = sample.groupby([s_col, a_col], dropna=False).size()
+            min_inner_count = int(inner_counts.min()) if len(inner_counts) else 1
+            min_inner_count = max(min_inner_count, 1)
+
+            outer_counts = sample.groupby(a_col, dropna=False).size()
+            min_outer_groups = max(int(outer_counts.min()), 1) if len(outer_counts) else 1
+
+            # Conservative choice
+            return y_range / min_inner_count
+
+        def _compute_query_table(sample: pd.DataFrame, crit: list[str], add_noise: bool = True) -> pd.DataFrame:
             value_col = _value_column_name(crit)
 
             if len(crit) == 2:
@@ -3162,24 +3213,32 @@ def run_experiment_9(
                     .sort_values(by=[s_col], kind="stable")
                     .reset_index(drop=True)
                 )
-                return out
+            else:
+                s_col, y_col, a_col = crit
 
-            s_col, y_col, a_col = crit
+                inner_group = sample.groupby([s_col, a_col], dropna=False)[y_col]
+                inner = (
+                    (inner_group.median() if _uses_median(crit) else inner_group.mean())
+                    .reset_index()
+                    .rename(columns={y_col: value_col})
+                )
 
-            inner_group = sample.groupby([s_col, a_col], dropna=False)[y_col]
-            inner = (
-                (inner_group.median() if _uses_median(crit) else inner_group.mean())
-                .reset_index()
-                .rename(columns={y_col: value_col})
-            )
+                outer_group = inner.groupby(a_col, dropna=False)[value_col]
+                out = (
+                    (outer_group.median() if _uses_median(crit) else outer_group.mean())
+                    .reset_index()
+                    .sort_values(by=[a_col], kind="stable")
+                    .reset_index(drop=True)
+                )
 
-            outer_group = inner.groupby(a_col, dropna=False)[value_col]
-            out = (
-                (outer_group.median() if _uses_median(crit) else outer_group.mean())
-                .reset_index()
-                .sort_values(by=[a_col], kind="stable")
-                .reset_index(drop=True)
-            )
+            if add_noise and epsilon is not None:
+                sens = _query_sensitivity(sample, crit)
+                out[value_col] = out[value_col].astype(float) + np.random.laplace(
+                    loc=0.0,
+                    scale=(sens / epsilon) if sens > 0 else 0.0,
+                    size=len(out),
+                )
+
             return out
 
         def _aggregate_query_tables(query_tables_by_rep: list[pd.DataFrame], crit: list[str]) -> pd.DataFrame:
@@ -3280,9 +3339,11 @@ def run_experiment_9(
                 crit_label = _criterion_label(crit)
                 query_sql = _query_string(crit)
 
-                q_table = _compute_query_table(sample, crit)
+                # Add Laplace noise only to released query results
+                q_table = _compute_query_table(sample, crit, add_noise=True)
                 query_tables_per_criterion[tuple(crit)].append(q_table)
 
+                # Keep disparity computation unchanged; measures already include noise separately
                 if len(crit) == 2:
                     s_col, y_col = crit
                     stats = _unconditional_story_stats(sample, s_col, y_col)
@@ -3427,10 +3488,10 @@ def run_experiment_9(
         Run Experiment 9 on the Compas dataset.
         """
         criteria = [
-            ["race", "decile_score", "age_cat"],          # q_3
-            ["age_cat", "decile_score", "race"],          # q_4
-            ["c_charge_degree", "decile_score", "race"],  # q_5
-            ["race", "decile_score", "c_charge_degree"],  # q_6
+            ["race", "decile_score", "age_cat"],           # q_3
+            ["age_cat", "decile_score", "race"],           # q_4
+            ["c_charge_degree", "decile_score", "race"],   # q_5
+            ["race", "decile_score", "c_charge_degree"],   # q_6
         ]
 
         _run_experiment_9_helper(
@@ -3465,7 +3526,6 @@ def run_experiment_9(
         outfile_csv_summary=outfile_csv_summary_compas,
         outfile_excel_queries=outfile_excel_queries_compas,
     )
-
 
 def run_experiment_10(
     step: float = 0.1,
